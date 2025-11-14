@@ -34,7 +34,7 @@ macro_rules! static_error_tests {
 #[macro_export]
 macro_rules! tests {
     // Accept test cases as identifier: { file: ..., ... }
-    ($kind:ident => $( $name:ident : { file: $file:literal, $(input: $input:literal,)? expected: $expected:literal $(,)? } ),* $(,)? ) => {
+    ($kind:ident => $( $name:ident : { file: $file:literal, $(input: $input:literal,)? expected: $expected:literal $(, typecheck: $typecheck:expr)? $(,)? } ),* $(,)? ) => {
         $(
             #[test]
             fn $name() {
@@ -42,28 +42,57 @@ macro_rules! tests {
                 let mut input = None;
                 $(input = Some($input);)?
                 let kind = $crate::infra::TestKind::$kind;
-                $crate::infra::run_test(stringify!($name), $file, input, $expected, kind);
+                let typecheck = false$(|| $typecheck)?;
+                $crate::infra::run_test_with_typecheck_flag(stringify!($name), $file, input, $expected, kind, typecheck);
             }
         )*
     };
 }
 
-pub(crate) fn run_test(
+
+
+pub(crate) fn run_test_with_typecheck_flag(
     name: &str,
     file: &str,
     input: Option<&str>,
     expected: &str,
     kind: TestKind,
+    typecheck: bool,
 ) {
     match kind {
-        TestKind::Success => run_success_test(name, file, expected, input),
-        TestKind::RuntimeError => run_runtime_error_test(name, file, expected, input),
-        TestKind::StaticError => run_static_error_test(name, file, expected),
+        TestKind::Success => run_success_test_with_typecheck(name, file, expected, input, typecheck),
+        TestKind::RuntimeError => run_runtime_error_test_with_typecheck(name, file, expected, input, typecheck),
+        TestKind::StaticError => run_static_error_test_with_typecheck(name, file, expected, typecheck),
+    }
+}
+fn run_success_test_with_typecheck(name: &str, file: &str, expected: &str, input: Option<&str>, typecheck: bool) {
+    let (jit_out, run_out) = match compile_with_typecheck(name, file, input, typecheck) {
+        Ok((jit, run)) => (jit, run),
+        Err(SnekError::Aot(err)) => panic!("expected a successful compilation, but got an AOT error: `{}`", err),
+        Err(SnekError::Jit(err)) => panic!("expected a successful compilation, but got a JIT error: `{}`", err),
+        Err(SnekError::Run(err)) => panic!("expected a successful run, but got a runtime error: `{}`", err),
+    };
+
+    let expected_trim = expected.trim();
+    let jit_trim = jit_out.trim();
+    let run_trim = run_out.trim();
+    let mut failed_flags = Vec::new();
+    if expected_trim != jit_trim {
+        failed_flags.push((if typecheck { "-te" } else { "-e" }, jit_trim.to_string(), jit_out));
+    }
+    if expected_trim != run_trim {
+        failed_flags.push((if typecheck { "-tc" } else { "-c" }, run_trim.to_string(), run_out));
+    }
+    if !failed_flags.is_empty() {
+        for (flag, actual_trim, raw) in &failed_flags {
+            eprintln!("Flag {} unexpected output:\n{}", flag, prettydiff::diff_lines(raw, expected_trim));
+        }
+        panic!("test failed: outputs did not match expected value for flags: {:?}", failed_flags.iter().map(|(f,_,_)| *f).collect::<Vec<_>>());
     }
 }
 
-fn run_runtime_error_test(name: &str, file: &str, expected: &str, input: Option<&str>) {
-    match compile(name, file, input) {
+fn run_runtime_error_test_with_typecheck(name: &str, file: &str, expected: &str, input: Option<&str>, typecheck: bool) {
+    match compile_with_typecheck(name, file, input, typecheck) {
         Err(SnekError::Aot(err)) => {
             panic!("expected a successful compilation, but got an AOT error: `{}`", err);
         }
@@ -77,11 +106,10 @@ fn run_runtime_error_test(name: &str, file: &str, expected: &str, input: Option<
     }
 }
 
-fn run_static_error_test(name: &str, file: &str, expected: &str) {
-    match compile(name, file, None) {
+fn run_static_error_test_with_typecheck(name: &str, file: &str, expected: &str, typecheck: bool) {
+    match compile_with_typecheck(name, file, None, typecheck) {
         Ok((e1,e2)) => panic!("expected a failure, but compilation succeeded"),
         Err(err) => check_error_msg(&err, expected),
-
     }
 }
 
@@ -115,15 +143,17 @@ impl std::fmt::Display for Ext {
     }
 }
 
-fn compile(name: &str, file: &str, input: Option<&str>) -> Result<(String, String), SnekError> {
-    // Run the compiler
+
+fn compile_with_typecheck(name: &str, file: &str, input: Option<&str>, typecheck: bool) -> Result<(String, String), SnekError> {
     let boa_path = if cfg!(target_os = "macos") {
         PathBuf::from("target/x86_64-apple-darwin/debug/cobra")
     } else {
         PathBuf::from("target/debug/cobra")
     };
+    // First phase: compile (-c or -tc)
+    let compile_flag = if typecheck { "-tc" } else { "-c" };
     let output_c = Command::new(&boa_path)
-        .arg("-c")
+        .arg(compile_flag)
         .arg(&mk_path(file, Ext::Snek))
         .arg(&mk_path(name, Ext::Asm))
         .output()
@@ -132,8 +162,10 @@ fn compile(name: &str, file: &str, input: Option<&str>) -> Result<(String, Strin
         return Err(SnekError::Aot(String::from_utf8(output_c.stderr).unwrap()));
     }
 
+    // Second phase: execute (-e or -te)
     let mut cmd_e = Command::new(&boa_path);
-    cmd_e.arg("-e").arg(&mk_path(file, Ext::Snek));
+    let exec_flag = if typecheck { "-te" } else { "-e" };
+    cmd_e.arg(exec_flag).arg(&mk_path(file, Ext::Snek));
     if let Some(inp) = input {
         cmd_e.arg(inp);
     }
@@ -176,53 +208,23 @@ fn run(name: &str, input: Option<&str>) -> Result<String, String> {
 }
 
 
-pub(crate) fn run_success_test(name: &str, file: &str, expected: &str, input: Option<&str>) {
-    let (jit_out, run_out) = match compile(name, file, input) {
-        Ok((jit, run)) => (jit, run),
-        Err(SnekError::Aot(err)) => panic!("expected a successful compilation, but got an AOT error: `{}`", err),
-        Err(SnekError::Jit(err)) => panic!("expected a successful compilation, but got a JIT error: `{}`", err),
-        Err(SnekError::Run(err)) => panic!("expected a successful run, but got a runtime error: `{}`", err),
-    };
-
-    let expected_trim = expected.trim();
-
-    let jit_trim = jit_out.trim();
-    let run_trim = run_out.trim();
-
-    let mut failed_flags = Vec::new();
-
-    if expected_trim != jit_trim {
-        failed_flags.push(("-e", jit_trim.to_string(), jit_out));
-    }
-    if expected_trim != run_trim {
-        failed_flags.push(("-c", run_trim.to_string(), run_out));
-    }
-
-    if !failed_flags.is_empty() {
-        for (flag, actual_trim, raw) in &failed_flags {
-            eprintln!("Flag {} unexpected output:\n{}", flag, prettydiff::diff_lines(raw, expected_trim));
-        }
-        panic!("test failed: outputs did not match expected value for flags: {:?}", failed_flags.iter().map(|(f,_,_)| *f).collect::<Vec<_>>());
-    }
-}
-
-
 #[macro_export]
 macro_rules! repl_tests {
-    ($($name:ident: [$($command:literal),*] => [$($expected:literal),*]),* $(,)?) => {
+    ($($name:ident: { commands: [$($command:expr),* $(,)?], expected: [$($expected:expr),* $(,)?] $(, typecheck: $typecheck:expr)? } ),* $(,)?) => {
         $(
         #[test]
         fn $name() {
             let commands = vec![$($command),*];
             let expected_outputs = vec![$($expected),*];
-            $crate::infra::run_repl_sequence_test(stringify!($name), &commands, &expected_outputs);
+            let typecheck = false$(|| $typecheck)?;
+            $crate::infra::run_repl_sequence_test(stringify!($name), &commands, &expected_outputs, typecheck);
         }
         )*
     }
 }
 
-pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_outputs: &[&str]) {
-    let actual_outputs = run_repl_with_timeout(commands, 3000);
+pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_outputs: &[&str], typecheck: bool) {
+    let actual_outputs = run_repl_with_timeout(commands, 3000, typecheck);
 
     let mut current_pos = 0;
     let mut found_outputs = Vec::new();
@@ -281,10 +283,7 @@ pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_out
 
 
 
-
-
-fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
-    // Probably dont need this for autograder
+fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64, typecheck: bool) -> String {
     let boa_path = if cfg!(target_os = "macos") {
         "target/x86_64-apple-darwin/debug/cobra"
     } else {
@@ -292,7 +291,7 @@ fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
     };
 
     let mut child = Command::new(boa_path)
-        .arg("-i")
+        .arg(if typecheck { "-ti" } else { "-i" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -301,24 +300,17 @@ fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
 
     {
         let stdin = child.stdin.as_mut().expect("failed to open stdin");
-        
         for command in commands {
             writeln!(stdin, "{}", command).unwrap();
             stdin.flush().unwrap();
             thread::sleep(Duration::from_millis(100));
         }
-        
-        // kill REPL
         writeln!(stdin, "").unwrap();
         stdin.flush().unwrap();
     }
-    
-    // Processing
+
     thread::sleep(Duration::from_millis(timeout_ms));
-    
     let _ = child.kill();
-    
     let output = child.wait_with_output().expect("failed to read output");
     String::from_utf8_lossy(&output.stdout).to_string()
 }
-
