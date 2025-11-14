@@ -1,0 +1,5 @@
+(let ((i 0) (x 0) (y 1) (z 0))
+    (loop 
+        (if (= i 5) (break x) (block (+ x y) (+ x z) (set! z y) (set! y x) (set! i (+ i 1))))
+    )
+)

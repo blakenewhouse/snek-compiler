@@ -1,0 +1,9 @@
+(fun (max2 a b)
+    (if (> a b) a b)
+)
+
+(fun (max3 a b c)
+    (max2 (max2 a b) c)
+)
+
+(print (max3 5 9 2))

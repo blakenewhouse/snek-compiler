@@ -1,0 +1,31 @@
+(fun (addingup a b in)
+  (if (> a in)
+    b
+    (block
+      (set! b (+ b a))
+      (set! a (+ a 1))
+      (addingup a b in)
+    )
+  )
+)
+
+(fun (double a b in)
+  (if (> a in)
+    b
+    (block
+      (set! b (+ b a))
+      (set! a (+ a 1))
+      (double a b in)
+    )
+  )
+)
+
+(block
+  (print input)
+  (let ((i 1) (n 0))
+    (print (addingup i n input))
+  )
+  (let ((i 1) (n 0))
+    (print (double i n input))
+  )
+)

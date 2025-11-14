@@ -1,0 +1,12 @@
+(fun (plusone n)
+  (apple n)
+)
+
+(fun (apple n)
+  (add1 n)
+)
+
+(block
+  (print input)
+  (print (plusone input))
+)

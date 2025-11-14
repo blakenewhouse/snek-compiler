@@ -1,0 +1,6 @@
+(fun (id n)
+  (block
+    (print n)
+    n))
+
+(print (id input))
