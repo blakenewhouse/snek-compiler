@@ -253,6 +253,8 @@ enum ReplEntry {
     Exit(),
 }
 
+enum Type { Num | Bool | Any | Nothing }
+
 fn parse_expr(s: &Sexp) -> Expr {
     let reserved = ["let", "if", "loop", "break", "set!", "block", "add1", "sub1", "neg", "+", "-", "*", "true", "false", "=", ">", ">=", "<", "<=", "input", "isnum", "isbool", "print", "fun"];
 
