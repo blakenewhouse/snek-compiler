@@ -1,0 +1,3 @@
+(fun (add (x : Num) (y : Num)) -> Num (+ x y))
+(fun (is_positive (n : Num)) -> Bool (> n 0))
+(add 5 10)

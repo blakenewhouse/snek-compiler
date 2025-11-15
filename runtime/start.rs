@@ -39,6 +39,7 @@ pub extern "C" fn snek_error(errcode: i64) {
         -13 => err_str = "ERROR_INFINITE_LOOP",
         -15 => err_str = "ERROR_LOOPLESS_BREAK",
         -17 => err_str = "ERROR_UNBOUND_VARIABLE",
+        -19 => err_str = "bad cast",
         _ => unreachable!(),
     }
     eprintln!("an error ocurred: {}", err_str);

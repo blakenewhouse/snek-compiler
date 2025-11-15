@@ -21,6 +21,7 @@ const ERROR_EQUAL_COMP_TYPES: i32 = -11;
 const ERROR_INFINITE_LOOP: i32 = -13;
 const ERROR_LOOPLESS_BREAK: i32 = -15;
 const ERROR_UNBOUND_VARIABLE: i32 = -17;
+const ERROR_BAD_CAST: i32 = -19;
 
 // Constants for tagging scheme 
 const BOOL_TAG: i64 = 0b1;
@@ -68,6 +69,7 @@ extern "C" fn snek_error_host(errcode: i64) {
         -13 => err_str = "ERROR_INFINITE_LOOP", //no more
         -15 => err_str = "break outside of a loop expression - ERROR_LOOPLESS_BREAK",
         -17 => err_str = "unbound variable - ERROR_UNBOUND_VARIABLE",
+        -19 => err_str = "bad cast",
         _ => unreachable!(),
     }
     eprintln!("an error ocurred: {}", err_str);
@@ -219,7 +221,8 @@ enum Op2 {
 #[derive(Clone)]
 struct FunDef {
     name: String,
-    params: Vec<String>,
+    params: Vec<(String, Type)>,
+    return_type: Type,
     body: Expr,
 }
 
@@ -244,6 +247,7 @@ enum Expr {
     Set(String, Box<Expr>),
     Block(Vec<Expr>),
     Call(String, Vec<Expr>),
+    Cast(Type, Box<Expr>),
 }
 
 enum ReplEntry {
@@ -253,10 +257,16 @@ enum ReplEntry {
     Exit(),
 }
 
-enum Type { Num | Bool | Any | Nothing }
+#[derive(Clone, Debug)]
+enum Type {
+    Num,
+    Bool,
+    Any,
+    Nothing,
+}
 
 fn parse_expr(s: &Sexp) -> Expr {
-    let reserved = ["let", "if", "loop", "break", "set!", "block", "add1", "sub1", "neg", "+", "-", "*", "true", "false", "=", ">", ">=", "<", "<=", "input", "isnum", "isbool", "print", "fun"];
+    let reserved = ["let", "if", "loop", "break", "set!", "block", "add1", "sub1", "neg", "+", "-", "*", "true", "false", "=", ">", ">=", "<", "<=", "input", "isnum", "isbool", "print", "fun", "cast"];
 
     match s {
         Sexp::Atom(atom) => match atom {
@@ -364,6 +374,13 @@ fn parse_expr(s: &Sexp) -> Expr {
                         Expr::Break(val)
                     }
 
+                    "cast" => {
+                        if items.len() != 3 { panic!("Invalid number of arguments for cast"); }
+                        let cast_type = parse_type(&items[1]);
+                        let expr = Box::new(parse_expr(&items[2]));
+                        Expr::Cast(cast_type, expr)
+                    }
+
                     "let" => {
                         if items.len() != 3 { panic!("Invalid number of arguments for {}", op.as_str()); }
                         match &items[1] {
@@ -411,14 +428,28 @@ fn parse_expr(s: &Sexp) -> Expr {
     }
 }
 
+fn parse_type(s: &Sexp) -> Type {
+    match s {
+        Sexp::Atom(S(t)) => match t.as_str() {
+            "Num" => Type::Num,
+            "Bool" => Type::Bool,
+            "Any" => Type::Any,
+            "Nothing" => Type::Nothing,
+            _ => panic!("Invalid: unknown type {}", t),
+        },
+        _ => panic!("Invalid: type must be an identifier (Num, Bool, Any, or Nothing)"),
+    }
+}
+
 fn parse_fun_def(s: &Sexp) -> Option<FunDef> {
-    // (fun (name param*) body)
+    // (fun (name (param : type)*) -> type body)
     match s {
         Sexp::List(items) if !items.is_empty() => {
             if let Sexp::Atom(S(op)) = &items[0] {
                 if op.as_str() != "fun" { return None; }
-                if items.len() != 3 { panic!("Invalid: fun expects exactly 2 parts: header and body"); }
-                // header
+                if items.len() != 5 { panic!("Invalid: fun expects format (fun (name (param : type)*) -> type body)"); }
+                
+                // Parse header: (name (param : type)*)
                 let header = &items[1];
                 let (name, params) = match header {
                     Sexp::List(h) if !h.is_empty() => {
@@ -426,19 +457,43 @@ fn parse_fun_def(s: &Sexp) -> Option<FunDef> {
                             Sexp::Atom(S(n)) => n.clone(), 
                             _ => panic!("Invalid: fun name must be identifier") 
                         };
-                        let mut ps: Vec<String> = Vec::new();
+                        let mut ps: Vec<(String, Type)> = Vec::new();
                         for p in &h[1..] {
-                            match p { 
-                                Sexp::Atom(S(n)) => ps.push(n.clone()), 
-                                _ => panic!("Invalid: parameter must be identifier") 
+                            match p {
+                                Sexp::List(param_def) if param_def.len() == 3 => {
+                                    // Expect (param_name : type)
+                                    let param_name = match &param_def[0] {
+                                        Sexp::Atom(S(n)) => n.clone(),
+                                        _ => panic!("Invalid: parameter name must be identifier"),
+                                    };
+                                    match &param_def[1] {
+                                        Sexp::Atom(S(colon)) if colon == ":" => {},
+                                        _ => panic!("Invalid: parameter definition must have format (name : type)"),
+                                    }
+                                    let param_type = parse_type(&param_def[2]);
+                                    ps.push((param_name, param_type));
+                                }
+                                _ => panic!("Invalid: parameter must have format (name : type)") 
                             }
                         }
                         (fname, ps)
                     }
-                    _ => panic!("Invalid: fun header must be a list (name params...)"),
+                    _ => panic!("Invalid: fun header must be a list (name (param : type)*)"),
                 };
-                let body = parse_expr(&items[2]);
-                Some(FunDef { name, params, body })
+                
+                // Check for arrow ->
+                match &items[2] {
+                    Sexp::Atom(S(arrow)) if arrow == "->" => {},
+                    _ => panic!("Invalid: function definition must have -> before return type"),
+                }
+                
+                // Parse return type
+                let return_type = parse_type(&items[3]);
+                
+                // Parse body
+                let body = parse_expr(&items[4]);
+                
+                Some(FunDef { name, params, return_type, body })
             } else { None }
         }
         _ => None,
@@ -776,6 +831,7 @@ fn contains_break_shallow(e: &Expr) -> bool {
         Expr::BinOp(_, l, r) => contains_break_shallow(l) || contains_break_shallow(r),
         Expr::Set(_, rhs) => contains_break_shallow(rhs),
         Expr::Block(es) => es.iter().any(|e| contains_break_shallow(e)),
+        Expr::Cast(_, expr) => contains_break_shallow(expr),
         _ => false,
     }
 }
@@ -1139,6 +1195,56 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String, 
             }
             instr_vec
         }
+        Expr::Cast(cast_type, expr) => {
+            let mut instr_vec: Vec<Instr> = compile_to_instrs_inner(expr, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs);
+            
+            match cast_type {
+                Type::Num => {
+                    // If value is a number, keep it; if boolean, error
+                    let ok_l = format!("cast_num_ok_{}", *lbl);
+                    let err_l = format!("cast_num_err_{}", *lbl);
+                    *lbl += 1;
+                    
+                    // Check if it's a boolean (tag bit is 1)
+                    instr_vec.push(Instr::IMov(Val::Reg(Reg::Rcx), Val::Reg(Reg::Rax)));
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_TRUE as i32)));
+                    instr_vec.push(Instr::Jz(err_l.clone()));
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_FALSE as i32)));
+                    instr_vec.push(Instr::Jz(err_l.clone()));
+                    instr_vec.push(Instr::Jmp(ok_l.clone()));
+
+                    instr_vec.push(Instr::Label(err_l));
+                    instr_vec.push(Instr::CallError(ERROR_BAD_CAST));
+                    instr_vec.push(Instr::Label(ok_l));
+                }
+                Type::Bool => {
+                    // If value is a boolean, keep it; if number, error
+                    let ok_l = format!("cast_bool_ok_{}", *lbl);
+                    let err_l = format!("cast_bool_err_{}", *lbl);
+                    *lbl += 1;
+                    
+
+                    instr_vec.push(Instr::IMov(Val::Reg(Reg::Rcx), Val::Reg(Reg::Rax)));
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_TRUE as i32)));
+                    instr_vec.push(Instr::Jz(ok_l.clone()));
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_FALSE as i32)));
+                    instr_vec.push(Instr::Jz(ok_l.clone()));
+
+                    instr_vec.push(Instr::Label(err_l));
+                    instr_vec.push(Instr::CallError(ERROR_BAD_CAST));
+                    instr_vec.push(Instr::Label(ok_l));
+                }
+                Type::Nothing => {
+                    // If <type> is Nothing, error with a string containing "bad cast"
+                    instr_vec.push(Instr::CallError(ERROR_BAD_CAST));
+                }
+                Type::Any => {
+                    // If <type> is Any, evaluate to v
+                }
+            }
+            
+            instr_vec
+        }
         Expr::Call(name, args) => {
             // Arity check
             let mut arity_opt: Option<usize> = None;
@@ -1181,6 +1287,7 @@ fn max_stack_usage(e: &Expr) -> i32 {
         Expr::Num(_) | Expr::Boolean(_) | Expr::Input | Expr::Id(_) => 0,
         Expr::UnOp(_, sub) => max_stack_usage(sub),
         Expr::Set(_, rhs) | Expr::Break(rhs) | Expr::Loop(rhs) => max_stack_usage(rhs),
+        Expr::Cast(_, expr) => max_stack_usage(expr),
         Expr::Block(es) => es.iter().map(max_stack_usage).max().unwrap_or(0),
         Expr::If(c,t,e2) => max_stack_usage(c).max(max_stack_usage(t)).max(max_stack_usage(e2)),
         Expr::BinOp(_, l, r) => {
@@ -1229,9 +1336,9 @@ fn compile_function_instrs(def: &FunDef, fun_sigs: &std::collections::HashMap<St
 
     // Build var env: params at [rbp + 24 + 8*i]
     let mut env: im::HashMap<String, i32> = im::HashMap::new();
-    for (i, p) in def.params.iter().enumerate() {
+    for (i, (param_name, _param_type)) in def.params.iter().enumerate() {
         let off = 16 + (i as i32)*8;
-        env.insert(p.clone(), off);
+        env.insert(param_name.clone(), off);
     }
     let fun_map: std::collections::HashMap<String, (usize, String)> = fun_sigs.iter().map(|(k,v)| (k.clone(), (v.arity, v.label.clone()))).collect();
     let empty_ptrs: std::collections::HashMap<String, (usize, i64)> = std::collections::HashMap::new();
@@ -1516,7 +1623,7 @@ fn compile_function_instrs_repl(def: &FunDef, lbl: &mut i32, define_env: &HashMa
     let frame_size = if frame_slots > 0 { frame_slots * 8 } else { 0 };
     if frame_size > 0 { instrs.push(Instr::SubRsp(frame_size)); }
     let mut env: im::HashMap<String, i32> = im::HashMap::new();
-    for (i, p) in def.params.iter().enumerate() { let off = 16 + (i as i32)*8; env.insert(p.clone(), off); }
+    for (i, (param_name, _param_type)) in def.params.iter().enumerate() { let off = 16 + (i as i32)*8; env.insert(param_name.clone(), off); }
     let empty_labels: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
     let body_instrs = compile_to_instrs(&def.body, 8, &env, define_env, define_ptr_env, lbl, &empty_labels, fun_ptrs);
     instrs.extend(body_instrs);
@@ -1586,6 +1693,10 @@ fn run_expr_with_define_mut(expr: &Expr, define_env: &mut HashMap<String, i64>, 
         }
     }
     res
+}
+
+fn tc(expr: &Expr, tenv: _____) {
+    
 }
 
 fn interactive_env() -> std::io::Result<()> {
