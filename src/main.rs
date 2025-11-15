@@ -1695,8 +1695,42 @@ fn run_expr_with_define_mut(expr: &Expr, define_env: &mut HashMap<String, i64>, 
     res
 }
 
-fn tc(expr: &Expr, tenv: _____) {
-    
+//helper functions for tc()
+fn union(t1: Type, t2: Type) -> Type {
+    match t1, t2 {
+        t, t => t,
+        Num, Bool => Any,
+        Bool, Num => Any,
+        Any, _ => Any,
+        _, Any => Any,
+        _, Nothing => Nothing,
+        Nothing, _ => Nothing,
+    }
+}
+
+fn subtype(t1: Type, t2: Type) -> bool {
+    match t1, t2 {
+        _, Any => true,
+        Nothing, _ => false,
+        t1, t2 => (t1 == t2)
+    }
+}
+
+// returns two types, where the first is the type of expr and the second is the type of all breaks in expr
+fn tc(expr: &Expr, tenv: _____) -> (Type, Type) {
+    match e {
+        Expr::Num(_) => (Type::Num, Type::Nothing),
+        Expr::Add(e1, e2) => {
+            let (t1, b1) = tc(e1, tenv);
+            let (t2, b2) = tc(e2, tenv);
+            if !(subtype(t1, Num) && subtype(t2, Num)) { 
+                panic!("Type error with Add");
+            }
+
+            (Type::Num, union(b1, b2))
+        }
+
+    }
 }
 
 fn interactive_env() -> std::io::Result<()> {
