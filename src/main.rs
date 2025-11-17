@@ -58,20 +58,19 @@ fn untag_boolean(v: i64) -> bool {
 // This is separate from the AOT runtime `snek_error` defined in runtime/start.rs.
 #[allow(unused_variables)]
 extern "C" fn snek_error_host(errcode: i64) {
-    let mut err_str = "";
-    match errcode {
-        -1 => err_str = "invalid argument - ERROR_ARITH_NOT_NUM",
-        -3 => err_str = "invalid argument - ERROR_COMP_NOT_NUM",
-        -5 => err_str = "invalid argument - ERROR_LOGIC_NOT_BOOL",
-        -7 => err_str = "invalid argument - ERROR_IF_NOT_BOOL",
-        -9 => err_str = "overflow error - ERROR_OVERFLOW",
-        -11 => err_str = "inequal types for comparison - ERROR_EQUAL_COMP_TYPES",
-        -13 => err_str = "ERROR_INFINITE_LOOP", //no more
-        -15 => err_str = "break outside of a loop expression - ERROR_LOOPLESS_BREAK",
-        -17 => err_str = "unbound variable - ERROR_UNBOUND_VARIABLE",
-        -19 => err_str = "bad cast",
+    let err_str = match errcode {
+        -1 => "invalid argument - ERROR_ARITH_NOT_NUM",
+        -3 => "invalid argument - ERROR_COMP_NOT_NUM",
+        -5 => "invalid argument - ERROR_LOGIC_NOT_BOOL",
+        -7 => "invalid argument - ERROR_IF_NOT_BOOL",
+        -9 => "overflow error - ERROR_OVERFLOW",
+        -11 => "inequal types for comparison - ERROR_EQUAL_COMP_TYPES",
+        -13 => "ERROR_INFINITE_LOOP", //no more
+        -15 => "break outside of a loop expression - ERROR_LOOPLESS_BREAK",
+        -17 => "unbound variable - ERROR_UNBOUND_VARIABLE",
+        -19 => "bad cast",
         _ => unreachable!(),
-    }
+    };
     eprintln!("an error ocurred: {}", err_str);
     std::process::exit(1);
 }
@@ -197,7 +196,7 @@ enum Instr {
 
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Op1 {
     Add1,
     Sub1,
@@ -206,7 +205,7 @@ enum Op1 {
     Print,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Op2 {
     Plus,
     Minus,
@@ -257,7 +256,7 @@ enum ReplEntry {
     Exit(),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Type {
     Num,
     Bool,
@@ -442,56 +441,92 @@ fn parse_type(s: &Sexp) -> Type {
 }
 
 fn parse_fun_def(s: &Sexp) -> Option<FunDef> {
-    // (fun (name (param : type)*) -> type body)
+    // Supports two formats:
+    // New: (fun (name (param : type)*) -> type body)
+    // Old (backward compatible): (fun (name param*) body) - defaults to Any
     match s {
         Sexp::List(items) if !items.is_empty() => {
             if let Sexp::Atom(S(op)) = &items[0] {
                 if op.as_str() != "fun" { return None; }
-                if items.len() != 5 { panic!("Invalid: fun expects format (fun (name (param : type)*) -> type body)"); }
                 
-                // Parse header: (name (param : type)*)
+                // Parse header
                 let header = &items[1];
-                let (name, params) = match header {
+                let (name, params, has_types) = match header {
                     Sexp::List(h) if !h.is_empty() => {
                         let fname = match &h[0] { 
                             Sexp::Atom(S(n)) => n.clone(), 
                             _ => panic!("Invalid: fun name must be identifier") 
                         };
-                        let mut ps: Vec<(String, Type)> = Vec::new();
-                        for p in &h[1..] {
-                            match p {
+                        
+                        // Check if first param is typed (has : in it)
+                        let is_typed = if h.len() > 1 {
+                            match &h[1] {
                                 Sexp::List(param_def) if param_def.len() == 3 => {
-                                    // Expect (param_name : type)
-                                    let param_name = match &param_def[0] {
-                                        Sexp::Atom(S(n)) => n.clone(),
-                                        _ => panic!("Invalid: parameter name must be identifier"),
-                                    };
-                                    match &param_def[1] {
-                                        Sexp::Atom(S(colon)) if colon == ":" => {},
-                                        _ => panic!("Invalid: parameter definition must have format (name : type)"),
-                                    }
-                                    let param_type = parse_type(&param_def[2]);
-                                    ps.push((param_name, param_type));
+                                    matches!(&param_def[1], Sexp::Atom(S(s)) if s == ":")
                                 }
-                                _ => panic!("Invalid: parameter must have format (name : type)") 
+                                _ => false
+                            }
+                        } else {
+                            false
+                        };
+                        
+                        let mut ps: Vec<(String, Type)> = Vec::new();
+                        
+                        if is_typed {
+                            // New format: (param : type)*
+                            for p in &h[1..] {
+                                match p {
+                                    Sexp::List(param_def) if param_def.len() == 3 => {
+                                        let param_name = match &param_def[0] {
+                                            Sexp::Atom(S(n)) => n.clone(),
+                                            _ => panic!("Invalid: parameter name must be identifier"),
+                                        };
+                                        match &param_def[1] {
+                                            Sexp::Atom(S(colon)) if colon == ":" => {},
+                                            _ => panic!("Invalid: parameter definition must have format (name : type)"),
+                                        }
+                                        let param_type = parse_type(&param_def[2]);
+                                        ps.push((param_name, param_type));
+                                    }
+                                    _ => panic!("Invalid: parameter must have format (name : type)") 
+                                }
+                            }
+                        } else {
+                            // Old format: just param names, default to Any
+                            for p in &h[1..] {
+                                match p {
+                                    Sexp::Atom(S(n)) => ps.push((n.clone(), Type::Any)),
+                                    _ => panic!("Invalid: parameter must be identifier in untyped format")
+                                }
                             }
                         }
-                        (fname, ps)
+                        
+                        (fname, ps, is_typed)
                     }
-                    _ => panic!("Invalid: fun header must be a list (name (param : type)*)"),
+                    _ => panic!("Invalid: fun header must be a list (name params...)"),
                 };
                 
-                // Check for arrow ->
-                match &items[2] {
-                    Sexp::Atom(S(arrow)) if arrow == "->" => {},
-                    _ => panic!("Invalid: function definition must have -> before return type"),
-                }
+                // Parse return type and body based on format
+                // Check if we have a -> which indicates typed format
+                let has_arrow = items.len() >= 3 && matches!(&items[2], Sexp::Atom(S(arrow)) if arrow == "->");
                 
-                // Parse return type
-                let return_type = parse_type(&items[3]);
-                
-                // Parse body
-                let body = parse_expr(&items[4]);
+                let (return_type, body) = if has_arrow {
+                    // New format: (fun (name (param : type)*) -> type body)
+                    if items.len() != 5 { 
+                        panic!("Invalid: annotated fun expects format (fun (name (param : type)*) -> type body)"); 
+                    }
+                    
+                    let return_type = parse_type(&items[3]);
+                    let body = parse_expr(&items[4]);
+                    (return_type, body)
+                } else {
+                    // Old format: (fun (name param*) body)
+                    if items.len() != 3 { 
+                        panic!("Invalid: unannotated fun expects format (fun (name param*) body)"); 
+                    }
+                    let body = parse_expr(&items[2]);
+                    (Type::Any, body)
+                };
                 
                 Some(FunDef { name, params, return_type, body })
             } else { None }
@@ -534,20 +569,20 @@ fn parse_repl_entry(s: &Sexp) -> ReplEntry {
                 }
                 // (define (name params...) body)
                 [Sexp::Atom(S(op)), header, body] if op == "define" => {
-                    // Reuse parse_fun_def header/body pattern
+                    // Old REPL format: parameters default to Any, return type defaults to Any
                     let (name, params) = match header {
                         Sexp::List(h) if !h.is_empty() => {
                             let fname = match &h[0] { Sexp::Atom(S(n)) => n.clone(), _ => panic!("Invalid: fun name must be identifier") };
-                            let mut ps: Vec<String> = Vec::new();
+                            let mut ps: Vec<(String, Type)> = Vec::new();
                             for p in &h[1..] {
-                                match p { Sexp::Atom(S(n)) => ps.push(n.clone()), _ => panic!("Invalid: parameter must be identifier") }
+                                match p { Sexp::Atom(S(n)) => ps.push((n.clone(), Type::Any)), _ => panic!("Invalid: parameter must be identifier") }
                             }
                             (fname, ps)
                         }
                         _ => panic!("Invalid: define function header must be a list (name params...)"),
                     };
                     let fun_body = parse_expr(body);
-                    ReplEntry::DefineFun(FunDef { name, params, body: fun_body })
+                    ReplEntry::DefineFun(FunDef { name, params, return_type: Type::Any, body: fun_body })
                 }
                 // (fun (name params...) body)
                 [Sexp::Atom(S(op)), ..] if op == "fun" => {
@@ -1400,7 +1435,7 @@ fn compile_expr(e: &Expr) -> String {
 }
 */
 
-fn compile_program_ops(p: &Program, ops : &mut dynasmrt::x64::Assembler, input_value: Option<i64>, define_env: &HashMap<String, i64>, define_ptr_env: &std::collections::HashMap<String, i64>, fun_ptrs: &std::collections::HashMap<String, (usize, i64)>) {
+fn compile_program_ops(p: &Program, ops : &mut dynasmrt::x64::Assembler, input_value: Option<i64>, define_env: &HashMap<String, i64>, define_ptr_env: &std::collections::HashMap<String, i64>, _fun_ptrs: &std::collections::HashMap<String, (usize, i64)>) {
     let fun_sigs = build_fun_sigs(&p.defs);
     let mut all_instrs: Vec<Instr> = Vec::new();
     // Emit entry first so our start pointer jumps directly into entry code
@@ -1697,40 +1732,290 @@ fn run_expr_with_define_mut(expr: &Expr, define_env: &mut HashMap<String, i64>, 
 
 //helper functions for tc()
 fn union(t1: Type, t2: Type) -> Type {
-    match t1, t2 {
-        t, t => t,
-        Num, Bool => Any,
-        Bool, Num => Any,
-        Any, _ => Any,
-        _, Any => Any,
-        _, Nothing => Nothing,
-        Nothing, _ => Nothing,
+    match (t1.clone(), t2.clone()) {
+        (t1, t2) if t1 == t2 => t1,
+        (Type::Num, Type::Bool) => Type::Any,
+        (Type::Bool, Type::Num) => Type::Any,
+        (Type::Any, _) => Type::Any,
+        (_, Type::Any) => Type::Any,
+        (t, Type::Nothing) => t,
+        (Type::Nothing, t) => t,
+        _ => Type::Any,
     }
 }
 
 fn subtype(t1: Type, t2: Type) -> bool {
-    match t1, t2 {
-        _, Any => true,
-        Nothing, _ => false,
-        t1, t2 => (t1 == t2)
+    match (t1, t2) {
+        (_, Type::Any) => true,
+        (Type::Nothing, _) => false,
+        (t1, t2) => t1 == t2
     }
 }
 
+// Type environment structure
+#[derive(Clone)]
+struct TEnv {
+    vars: im::HashMap<String, Type>,
+    funcs: std::collections::HashMap<String, (Vec<Type>, Type)>, // (param_types, return_type)
+    input_type: Type, // Type of input (default Any)
+}
+
 // returns two types, where the first is the type of expr and the second is the type of all breaks in expr
-fn tc(expr: &Expr, tenv: _____) -> (Type, Type) {
-    match e {
+fn tc(expr: &Expr, tenv: &TEnv) -> (Type, Type) {
+    match expr {
         Expr::Num(_) => (Type::Num, Type::Nothing),
-        Expr::Add(e1, e2) => {
+        
+        Expr::Boolean(_) => (Type::Bool, Type::Nothing),
+        
+        Expr::Input => (tenv.input_type.clone(), Type::Nothing),
+        
+        Expr::Id(name) => {
+            match tenv.vars.get(name) {
+                Some(t) => (t.clone(), Type::Nothing),
+                None => panic!("Unbound variable: {}", name),
+            }
+        }
+        
+        Expr::UnOp(op, e) => {
+            let (t, b) = tc(e, tenv);
+            match op {
+                Op1::Add1 | Op1::Sub1 => {
+                    if !subtype(t.clone(), Type::Num) {
+                        panic!("Type error: {:?} requires Num", op);
+                    }
+                    (Type::Num, b)
+                }
+                Op1::IsNum | Op1::IsBool => {
+                    (Type::Bool, b)
+                }
+                Op1::Print => {
+                    (t, b)
+                }
+            }
+        }
+        
+        Expr::BinOp(op, e1, e2) => {
             let (t1, b1) = tc(e1, tenv);
             let (t2, b2) = tc(e2, tenv);
-            if !(subtype(t1, Num) && subtype(t2, Num)) { 
-                panic!("Type error with Add");
+            match op {
+                Op2::Plus | Op2::Minus | Op2::Times => {
+                    if !(subtype(t1, Type::Num) && subtype(t2, Type::Num)) {
+                        panic!("Type error: arithmetic operations require Num");
+                    }
+                    (Type::Num, union(b1, b2))
+                }
+                Op2::Greater | Op2::GreaterEqual | Op2::Less | Op2::LessEqual => {
+                    if !(subtype(t1, Type::Num) && subtype(t2, Type::Num)) {
+                        panic!("Type error: comparison operations require Num");
+                    }
+                    (Type::Bool, union(b1, b2))
+                }
+                Op2::Equal => {
+                    (Type::Bool, union(b1, b2))
+                }
             }
-
-            (Type::Num, union(b1, b2))
         }
-
+        
+        Expr::Let(bindings, body) => {
+            let mut new_tenv = tenv.clone();
+            let mut break_type = Type::Nothing;
+            
+            for (name, bind_expr) in bindings {
+                let (t, b) = tc(bind_expr, &new_tenv);
+                new_tenv.vars.insert(name.clone(), t);
+                break_type = union(break_type, b);
+            }
+            
+            let (body_type, body_break) = tc(body, &new_tenv);
+            (body_type, union(break_type, body_break))
+        }
+        
+        Expr::If(cond, thn, els) => {
+            let (cond_t, cond_b) = tc(cond, tenv);
+            if !subtype(cond_t, Type::Bool) {
+                panic!("Type error: if condition must be Bool");
+            }
+            
+            let (thn_t, thn_b) = tc(thn, tenv);
+            let (els_t, els_b) = tc(els, tenv);
+            
+            let result_type = union(thn_t, els_t);
+            let break_type = union(union(cond_b, thn_b), els_b);
+            (result_type, break_type)
+        }
+        
+        Expr::Loop(body) => {
+            let (_, body_break) = tc(body, tenv);
+            (body_break, Type::Nothing)
+        }
+        
+        Expr::Break(e) => {
+            let (t, b) = tc(e, tenv);
+            (Type::Nothing, union(t, b))
+        }
+        
+        Expr::Set(name, rhs) => {
+            let (rhs_t, rhs_b) = tc(rhs, tenv);
+            match tenv.vars.get(name) {
+                Some(var_t) => {
+                    if !subtype(rhs_t.clone(), var_t.clone()) {
+                        panic!("Type error: cannot assign {:?} to variable of type {:?}", rhs_t, var_t);
+                    }
+                    (rhs_t, rhs_b)
+                }
+                None => panic!("Unbound variable in set!: {}", name),
+            }
+        }
+        
+        Expr::Block(exprs) => {
+            if exprs.is_empty() {
+                panic!("Empty block");
+            }
+            
+            let mut result_type = Type::Nothing;
+            let mut break_type = Type::Nothing;
+            
+            for e in exprs {
+                let (t, b) = tc(e, tenv);
+                result_type = t;
+                break_type = union(break_type, b);
+            }
+            
+            (result_type, break_type)
+        }
+        
+        Expr::Call(fname, args) => {
+            match tenv.funcs.get(fname) {
+                Some((param_types, return_type)) => {
+                    if args.len() != param_types.len() {
+                        panic!("Type error: function {} expects {} arguments, got {}", 
+                               fname, param_types.len(), args.len());
+                    }
+                    
+                    let mut break_type = Type::Nothing;
+                    for (i, arg) in args.iter().enumerate() {
+                        let (arg_t, arg_b) = tc(arg, tenv);
+                        if !subtype(arg_t.clone(), param_types[i].clone()) {
+                            panic!("Type error: argument {} of {} has type {:?}, expected {:?}", 
+                                   i, fname, arg_t, param_types[i]);
+                        }
+                        break_type = union(break_type, arg_b);
+                    }
+                    
+                    (return_type.clone(), break_type)
+                }
+                None => panic!("Undefined function: {}", fname),
+            }
+        }
+        
+        Expr::Cast(target_type, e) => {
+            let (_expr_t, expr_b) = tc(e, tenv);
+            match target_type {
+                Type::Any => (Type::Any, expr_b),
+                Type::Nothing => (Type::Nothing, expr_b),
+                _ => {
+                    // For Num and Bool, the cast enforces that type at runtime
+                    (target_type.clone(), expr_b)
+                }
+            }
+        }
     }
+}
+
+// Helper function to build type environment from function definitions
+fn build_tenv(defs: &Vec<FunDef>) -> TEnv {
+    let mut funcs = std::collections::HashMap::new();
+    
+    for def in defs {
+        let param_types: Vec<Type> = def.params.iter().map(|(_, t)| t.clone()).collect();
+        funcs.insert(def.name.clone(), (param_types, def.return_type.clone()));
+    }
+    
+    TEnv {
+        vars: im::HashMap::new(),
+        funcs,
+        input_type: Type::Any,
+    }
+}
+
+// Helper function to build type environment with specific input type
+fn build_tenv_with_input(defs: &Vec<FunDef>, input_type: Type) -> TEnv {
+    let mut funcs = std::collections::HashMap::new();
+    
+    for def in defs {
+        let param_types: Vec<Type> = def.params.iter().map(|(_, t)| t.clone()).collect();
+        funcs.insert(def.name.clone(), (param_types, def.return_type.clone()));
+    }
+    
+    TEnv {
+        vars: im::HashMap::new(),
+        funcs,
+        input_type,
+    }
+}
+
+// Determine type from input string
+fn get_input_type(input: &str) -> Type {
+    match input {
+        "true" | "false" => Type::Bool,
+        _ => {
+            if input.parse::<i64>().is_ok() {
+                Type::Num
+            } else {
+                Type::Any
+            }
+        }
+    }
+}
+
+// Type-check a function definition
+fn tc_function(def: &FunDef, tenv: &TEnv) {
+    // Build environment with parameters
+    let mut func_tenv = tenv.clone();
+    for (param_name, param_type) in &def.params {
+        func_tenv.vars.insert(param_name.clone(), param_type.clone());
+    }
+    
+    let (body_type, _break_type) = tc(&def.body, &func_tenv);
+    
+    // Check that body type matches return type
+    if !subtype(body_type.clone(), def.return_type.clone()) {
+        panic!("Type error in function {}: body has return type {:?}, expected {:?}", 
+               def.name, body_type, def.return_type);
+    }
+    /*
+    // Breaks should not escape function body (break_type should be Nothing)
+    if break_type != Type::Nothing {
+        panic!("Type error in function {}: break escapes function body", def.name);
+    }*/
+}
+
+// Type-check an entire program
+fn tc_program(program: &Program) -> Type {
+    let tenv = build_tenv(&program.defs);
+    
+    // Type-check all function definitions
+    for def in &program.defs {
+        tc_function(def, &tenv);
+    }
+    
+    // Type-check the main body and return its type
+    let (body_type, break_type) = tc(&program.body, &tenv);
+    body_type
+}
+
+// Type-check a program with specific input type
+fn tc_program_with_input(program: &Program, input_type: Type) -> Type {
+    let tenv = build_tenv_with_input(&program.defs, input_type);
+    
+    // Type-check all function definitions
+    for def in &program.defs {
+        tc_function(def, &tenv);
+    }
+    
+    // Type-check the main body and return its type
+    let (body_type, break_type) = tc(&program.body, &tenv);
+    body_type
 }
 
 fn interactive_env() -> std::io::Result<()> {
@@ -1843,20 +2128,216 @@ fn interactive_env() -> std::io::Result<()> {
     }
 }
 
+fn typed_interactive_env() -> std::io::Result<()> {
+    println!("\nWelcome to the snek REPL with type checking! Type \"exit\" to quit.\n");
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut define_env: HashMap<String, i64> = HashMap::new();
+    let mut define_ptr_env: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut fun_defs: Vec<FunDef> = Vec::new();
+    let mut fun_ptrs: std::collections::HashMap<String, (usize, i64)> = std::collections::HashMap::new();
+    let mut code_pages: Vec<dynasmrt::ExecutableBuffer> = Vec::new();
+    let mut var_types: im::HashMap<String, Type> = im::HashMap::new(); // Track variable types
+
+    loop {
+        print!("> ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        match reader.read_line(&mut input) {
+            Ok(0) => {
+                println!("See you next time!\n");
+                std::process::exit(1);
+            }
+            Ok(_) => {
+                let input = input.trim();
+                if input.is_empty() {
+                    continue;
+                }
+
+                match parse(input) {
+                    Ok(sexp) => {
+                        match std::panic::catch_unwind(|| parse_repl_entry(&sexp)) {
+                            Ok(ReplEntry::Define(var, expr)) => {
+                                // Type-check the expression first
+                                let tenv = TEnv {
+                                    vars: var_types.clone(),
+                                    funcs: fun_defs.iter().map(|fd| {
+                                        let param_types: Vec<Type> = fd.params.iter().map(|(_, t)| t.clone()).collect();
+                                        (fd.name.clone(), (param_types, fd.return_type.clone()))
+                                    }).collect(),
+                                    input_type: Type::Any,
+                                };
+                                
+                                match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
+                                    Ok((expr_type, _)) => {
+                                        // Type check passed, now evaluate
+                                        for (name, val) in define_env.iter() {
+                                            if !define_ptr_env.contains_key(name) {
+                                                let boxed = Box::new(*val as i64);
+                                                let ptr = Box::into_raw(boxed) as i64;
+                                                define_ptr_env.insert(name.clone(), ptr);
+                                            }
+                                        }
+                                        match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+                                            Ok(value) => {
+                                                if let Some(ptr) = define_ptr_env.get(&var) {
+                                                    unsafe { *( *ptr as *mut i64) = value as i64; }
+                                                } else {
+                                                    let boxed = Box::new(value as i64);
+                                                    let ptr = Box::into_raw(boxed) as i64;
+                                                    define_ptr_env.insert(var.clone(), ptr);
+                                                }
+                                                define_env.insert(var.clone(), value);
+                                                var_types.insert(var.clone(), expr_type);
+                                            }
+                                            Err(e) => println!("{}", e),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(msg) = e.downcast_ref::<String>() {
+                                            println!("Type error: {}", msg);
+                                        } else if let Some(msg) = e.downcast_ref::<&str>() {
+                                            println!("Type error: {}", msg);
+                                        } else {
+                                            println!("Type error occurred");
+                                        }
+                                    }
+                                }
+                            },
+                            Ok(ReplEntry::DefineFun(fd)) => {
+                                // Type-check the function
+                                let tenv = TEnv {
+                                    vars: im::HashMap::new(),
+                                    funcs: fun_defs.iter().map(|f| {
+                                        let param_types: Vec<Type> = f.params.iter().map(|(_, t)| t.clone()).collect();
+                                        (f.name.clone(), (param_types, f.return_type.clone()))
+                                    }).collect(),
+                                    input_type: Type::Any,
+                                };
+                                
+                                match std::panic::catch_unwind(|| tc_function(&fd, &tenv)) {
+                                    Ok(_) => {
+                                        // Type check passed, compile and store
+                                        if fun_defs.iter().any(|f| f.name == fd.name) {
+                                            if let Some(pos) = fun_defs.iter().position(|f| f.name == fd.name) { 
+                                                fun_defs.remove(pos); 
+                                            }
+                                        }
+                                        let arity = fd.params.len();
+                                        let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+                                        let start = ops.offset();
+                                        let mut lbl = 0;
+                                        let finstrs = compile_function_instrs_repl(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs);
+                                        lower_instrs_to_ops(finstrs, &mut ops);
+                                        let buf = ops.finalize().unwrap();
+                                        let ptr = buf.ptr(start) as i64;
+                                        fun_ptrs.insert(fd.name.clone(), (arity, ptr));
+                                        code_pages.push(buf);
+                                        fun_defs.push(fd);
+                                    }
+                                    Err(e) => {
+                                        if let Some(msg) = e.downcast_ref::<String>() {
+                                            println!("Type error: {}", msg);
+                                        } else if let Some(msg) = e.downcast_ref::<&str>() {
+                                            println!("Type error: {}", msg);
+                                        } else {
+                                            println!("Type error occurred");
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(ReplEntry::Exit()) => {
+                                println!("See you next time!\n");
+                                std::process::exit(1);
+                            }
+                            Ok(ReplEntry::Expr(expr)) => {
+                                // Type-check the expression first
+                                let tenv = TEnv {
+                                    vars: var_types.clone(),
+                                    funcs: fun_defs.iter().map(|fd| {
+                                        let param_types: Vec<Type> = fd.params.iter().map(|(_, t)| t.clone()).collect();
+                                        (fd.name.clone(), (param_types, fd.return_type.clone()))
+                                    }).collect(),
+                                    input_type: Type::Any,
+                                };
+                                
+                                match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
+                                    Ok((_expr_type, _)) => {
+                                        // Type check passed, now evaluate
+                                        for (name, val) in define_env.iter() {
+                                            if !define_ptr_env.contains_key(name) {
+                                                let boxed = Box::new(*val as i64);
+                                                let ptr = Box::into_raw(boxed) as i64;
+                                                define_ptr_env.insert(name.clone(), ptr);
+                                            }
+                                        }
+                                        match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+                                            Ok(result) => println!("{}", format_value(result)),
+                                            Err(e) => println!("{}", e),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(msg) = e.downcast_ref::<String>() {
+                                            println!("Type error: {}", msg);
+                                        } else if let Some(msg) = e.downcast_ref::<&str>() {
+                                            println!("Type error: {}", msg);
+                                        } else {
+                                            println!("Type error occurred");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(msg) = e.downcast_ref::<String>() {
+                                    println!("Parse error: {}", msg);
+                                } else if let Some(msg) = e.downcast_ref::<&str>() {
+                                    println!("Parse error: {}", msg);
+                                } else {
+                                    println!("Parse error");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Parse error: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading line: {}", e);
+                return Err(e);
+            }
+        }
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        panic!("Invalid Flag - Usage: program (-c|-e|-g|-i) <in.snek> <out.asm>");
+        panic!("Invalid Flag - Usage: program (-c|-e|-g|-i|-t|-tc|-tg|-te|-ti) <in.snek> <out.asm>");
     }
 
     let flag = &args[1];
 
+    // Handle interactive flags
     if flag == "-i" {
         if args.len() > 2 {
             panic!("Invalid arguments for \"-i\" - The interactive environment flag takes no arguments");
         }
         match interactive_env() {
+            Err(e) => eprintln!("Error: {}", e),
+            _ => return Ok(())
+        }
+    }
+
+    if flag == "-ti" {
+        if args.len() > 2 {
+            panic!("Invalid arguments for \"-ti\" - The typed interactive environment flag takes no arguments");
+        }
+        match typed_interactive_env() {
             Err(e) => eprintln!("Error: {}", e),
             _ => return Ok(())
         }
@@ -1926,7 +2407,152 @@ fn main() -> std::io::Result<()> {
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
-        _ => panic!("Invalid Flag - Usage: program (-c|-e|-g|-i) <in.snek> <out.asm>"),
+        "-t" => {
+            // Typecheck only
+            if args.len() != 3 {
+                panic!("Invalid arguments for \"-t\" - Usage: program -t <in.snek>");
+            }
+            match std::panic::catch_unwind(|| tc_program(&program)) {
+                Ok(return_type) => {
+                    println!("Type check passed!");
+                    println!("Program return type: {:?}", return_type);
+                }
+                Err(e) => {
+                    if let Some(msg) = e.downcast_ref::<String>() {
+                        eprintln!("Type error: {}", msg);
+                    } else if let Some(msg) = e.downcast_ref::<&str>() {
+                        eprintln!("Type error: {}", msg);
+                    } else {
+                        eprintln!("Type error occurred");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+        "-tc" => {
+            // Typecheck and compile
+            if args.len() != 4 && args.len() != 5 {
+                panic!("Invalid arguments for \"-tc\" - Usage: program -tc <in.snek> <out.asm> [input]");
+            }
+            
+            // First typecheck
+            match std::panic::catch_unwind(|| tc_program(&program)) {
+                Ok(_return_type) => {
+                    println!("Type check passed!");
+                }
+                Err(e) => {
+                    if let Some(msg) = e.downcast_ref::<String>() {
+                        eprintln!("Compile type error: {}", msg);
+                    } else if let Some(msg) = e.downcast_ref::<&str>() {
+                        eprintln!("Compile type error: {}", msg);
+                    } else {
+                        eprintln!("Compile type error");
+                    }
+                    std::process::exit(1);
+                }
+            }
+            
+            // Then compile
+            let out_name = &args[3];
+            let asm_program = if args.len() == 5 {
+                let tagged = parse_input_host(&args[4]) as i64;
+                let injected = result.replacen("our_code_starts_here:\n", &format!("our_code_starts_here:\n  mov rdi, {}\n", tagged), 1);
+                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", injected)
+            } else {
+                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", result)
+            };
+            let mut out_file = File::create(out_name)?;
+            out_file.write_all(asm_program.as_bytes())?;
+            println!("Wrote assembly to {}", out_name);
+            return Ok(());
+        }
+        "-tg" => {
+            // Typecheck with input type, then generate and run
+            if args.len() != 4 && args.len() != 5 {
+                panic!("Invalid arguments for \"-tg\" - Usage: program -tg <in.snek> <out.asm> [input]");
+            }
+            
+            // Determine input type
+            let input_type = if args.len() == 5 {
+                get_input_type(&args[4])
+            } else {
+                Type::Any
+            };
+            
+            // Typecheck with input type
+            match std::panic::catch_unwind(|| tc_program_with_input(&program, input_type)) {
+                Ok(_return_type) => {
+                    println!("Type check passed!");
+                }
+                Err(e) => {
+                    if let Some(msg) = e.downcast_ref::<String>() {
+                        eprintln!("Type error: {}", msg);
+                    } else if let Some(msg) = e.downcast_ref::<&str>() {
+                        eprintln!("Type error: {}", msg);
+                    } else {
+                        eprintln!("Type error occurred");
+                    }
+                    std::process::exit(1);
+                }
+            }
+            
+            // Generate assembly
+            let out_name = &args[3];
+            let asm_program = if args.len() == 5 {
+                let tagged = parse_input_host(&args[4]) as i64;
+                let injected = result.replacen("our_code_starts_here:\n", &format!("our_code_starts_here:\n  mov rdi, {}\n", tagged), 1);
+                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", injected)
+            } else {
+                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", result)
+            };
+            let mut out_file = File::create(out_name)?;
+            out_file.write_all(asm_program.as_bytes())?;
+            
+            // Evaluate via JIT with optional input
+            let input_opt = if args.len() == 5 { Some(parse_input_host(&args[4])) } else { None };
+            match eval_program(&in_contents, input_opt) {
+                Ok(result) => println!("{}", result),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        "-te" => {
+            // Typecheck with input type, then evaluate
+            if args.len() != 3 && args.len() != 4 {
+                panic!("Invalid arguments for \"-te\" - Usage: program -te <in.snek> [input]");
+            }
+            
+            // Determine input type
+            let input_type = if args.len() == 4 {
+                get_input_type(&args[3])
+            } else {
+                Type::Any
+            };
+            
+            // Typecheck with input type
+            match std::panic::catch_unwind(|| tc_program_with_input(&program, input_type)) {
+                Ok(_return_type) => {
+                    println!("Type check passed!");
+                }
+                Err(e) => {
+                    if let Some(msg) = e.downcast_ref::<String>() {
+                        eprintln!("Type error: {}", msg);
+                    } else if let Some(msg) = e.downcast_ref::<&str>() {
+                        eprintln!("Type error: {}", msg);
+                    } else {
+                        eprintln!("Type error occurred");
+                    }
+                    std::process::exit(1);
+                }
+            }
+            
+            // Evaluate
+            let input_opt = if args.len() == 4 { Some(parse_input_host(&args[3])) } else { None };
+            match eval_program(&in_contents, input_opt) {
+                Ok(result) => println!("{}", result),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        _ => panic!("Invalid Flag - Usage: program (-c|-e|-g|-i|-t|-tc|-tg|-te|-ti) <in.snek> <out.asm>"),
     }
     
     

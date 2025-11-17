@@ -1,0 +1,14 @@
+(fun (multiply x y) (* x y))
+(fun (add_nums (a : Num) (b : Num)) -> Num (+ a b))
+(fun (return_bool) -> Any (> 5 3))
+(fun (return_num (x : Num)) -> Num (+ x 1))
+(fun (mixed (x : Num) (y : Bool)) -> Any 
+  (if y x 0))
+  
+(block
+  (print (multiply 3 4))
+  (print (add_nums 10 20))
+  (print (return_bool))
+  (print (return_num 42))
+  (mixed 100 true)
+)

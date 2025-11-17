@@ -27,21 +27,20 @@ pub extern "C" fn snek_print(val: u64) -> u64 {
 }
 
 #[export_name = "\x01snek_error"]
-pub extern "C" fn snek_error(errcode: i64) {
-    let mut err_str = "";
-    match errcode {
-        -1 => err_str = "invalid argument - ERROR_ARITH_NOT_NUM",
-        -3 => err_str = "invalid argument - ERROR_COMP_NOT_NUM",
-        -5 => err_str = "invalid argument - ERROR_LOGIC_NOT_BOOL",
-        -7 => err_str = "invalid argument - ERROR_IF_NOT_BOOL",
-        -9 => err_str = "overflow error - ERROR_OVERFLOW",
-        -11 => err_str = "ERROR_EQUAL_COMP_TYPES",
-        -13 => err_str = "ERROR_INFINITE_LOOP",
-        -15 => err_str = "ERROR_LOOPLESS_BREAK",
-        -17 => err_str = "ERROR_UNBOUND_VARIABLE",
-        -19 => err_str = "bad cast",
+pub extern "C" fn snek_error_host(errcode: i64) {
+    let err_str = match errcode {
+        -1 => "invalid argument - ERROR_ARITH_NOT_NUM",
+        -3 => "invalid argument - ERROR_COMP_NOT_NUM",
+        -5 => "invalid argument - ERROR_LOGIC_NOT_BOOL",
+        -7 => "invalid argument - ERROR_IF_NOT_BOOL",
+        -9 => "overflow error - ERROR_OVERFLOW",
+        -11 => "inequal types for comparison - ERROR_EQUAL_COMP_TYPES",
+        -13 => "ERROR_INFINITE_LOOP", //no more
+        -15 => "break outside of a loop expression - ERROR_LOOPLESS_BREAK",
+        -17 => "unbound variable - ERROR_UNBOUND_VARIABLE",
+        -19 => "bad cast",
         _ => unreachable!(),
-    }
+    };
     eprintln!("an error ocurred: {}", err_str);
     std::process::exit(1);
 }

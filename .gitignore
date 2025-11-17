@@ -8,3 +8,4 @@ runtime/*.a
 /tests/*.a
 /tests/*.o
 Cargo.lock
+TYPECHECKER.md
