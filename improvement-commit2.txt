@@ -1,0 +1,893 @@
+commit 661c7a73d7b4eb175ea6de3ca4c5220654dbab3b
+Author: Blake Newhouse <blakenewhouse@gmail.com>
+Date:   Mon Nov 17 13:56:29 2025 -0800
+
+    added comments to assembly for further clarity/code comprehension
+
+diff --git a/COMMENTS.md b/COMMENTS.md
+new file mode 100644
+index 0000000..dd531de
+--- /dev/null
++++ b/COMMENTS.md
+@@ -0,0 +1,46 @@
++# Assembly Comments Feature
++
++## Overview
++The compiler now supports adding comments to generated x86_64 assembly code using the `Instr::Comment` variant.
++
++## Usage
++
++### Adding Comments in Code Generation
++To add a comment to your generated assembly, use:
++```rust
++instrs.push(Instr::Comment("Your comment here".to_string()));
++```
++
++### Example
++```rust
++// In your compilation function:
++instr_vec.push(Instr::Comment("Let bindings start".to_string()));
++for (name, bind_expr) in bindings {
++    instr_vec.push(Instr::Comment(format!("Binding: {}", name)));
++    // ... rest of compilation logic
++}
++```
++
++### Generated Assembly
++Comments appear in the assembly with a semicolon prefix:
++```asm
++; Let bindings start
++; Binding: x
++mov rax, 10
++; Binding: y
++mov rax, 20
++```
++
++## Implementation Details
++
++- **Enum Variant**: `Instr::Comment(String)` added to the `Instr` enum
++- **String Output**: Comments are rendered as `; <text>` in assembly
++- **JIT Compilation**: Comments are safely ignored during JIT execution (they generate no machine code)
++- **No Performance Impact**: Comments are purely for readability and debugging
++
++## Benefits
++
++1. **Improved Readability**: Makes generated assembly easier to understand
++2. **Debugging**: Helps trace back assembly to source constructs
++3. **Documentation**: Self-documents what each section of code does
++4. **No Runtime Cost**: Comments don't affect program execution or performance
+diff --git a/improvement-commit1.txt b/improvement-commit1.txt
+new file mode 100644
+index 0000000..b3931ad
+--- /dev/null
++++ b/improvement-commit1.txt
+@@ -0,0 +1,567 @@
++commit 8da91a9b3dee64d1aeec9df83fa0262a1df75057
++Author: Blake Newhouse <blakenewhouse@gmail.com>
++Date:   Mon Nov 17 13:22:58 2025 -0800
++
++    refactored typechecking to replace excess functions
++
++diff --git a/src/main.rs b/src/main.rs
++index f6ce811..7101e0a 100644
++--- a/src/main.rs
+++++ b/src/main.rs
++@@ -1923,7 +1923,8 @@ fn tc(expr: &Expr, tenv: &TEnv) -> (Type, Type) {
++ }
++ 
++ // Helper function to build type environment from function definitions
++-fn build_tenv(defs: &Vec<FunDef>) -> TEnv {
+++// If input_type is None, defaults to Type::Any
+++fn build_tenv(defs: &Vec<FunDef>, input_type: Option<Type>) -> TEnv {
++     let mut funcs = std::collections::HashMap::new();
++     
++     for def in defs {
++@@ -1934,23 +1935,7 @@ fn build_tenv(defs: &Vec<FunDef>) -> TEnv {
++     TEnv {
++         vars: im::HashMap::new(),
++         funcs,
++-        input_type: Type::Any,
++-    }
++-}
++-
++-// Helper function to build type environment with specific input type
++-fn build_tenv_with_input(defs: &Vec<FunDef>, input_type: Type) -> TEnv {
++-    let mut funcs = std::collections::HashMap::new();
++-    
++-    for def in defs {
++-        let param_types: Vec<Type> = def.params.iter().map(|(_, t)| t.clone()).collect();
++-        funcs.insert(def.name.clone(), (param_types, def.return_type.clone()));
++-    }
++-    
++-    TEnv {
++-        vars: im::HashMap::new(),
++-        funcs,
++-        input_type,
+++        input_type: input_type.unwrap_or(Type::Any),
++     }
++ }
++ 
++@@ -1991,8 +1976,9 @@ fn tc_function(def: &FunDef, tenv: &TEnv) {
++ }
++ 
++ // Type-check an entire program
++-fn tc_program(program: &Program) -> Type {
++-    let tenv = build_tenv(&program.defs);
+++// If input_type is None, defaults to Type::Any
+++fn tc_program(program: &Program, input_type: Option<Type>) -> Type {
+++    let tenv = build_tenv(&program.defs, input_type);
++     
++     // Type-check all function definitions
++     for def in &program.defs {
++@@ -2004,133 +1990,9 @@ fn tc_program(program: &Program) -> Type {
++     body_type
++ }
++ 
++-// Type-check a program with specific input type
++-fn tc_program_with_input(program: &Program, input_type: Type) -> Type {
++-    let tenv = build_tenv_with_input(&program.defs, input_type);
++-    
++-    // Type-check all function definitions
++-    for def in &program.defs {
++-        tc_function(def, &tenv);
++-    }
++-    
++-    // Type-check the main body and return its type
++-    let (body_type, break_type) = tc(&program.body, &tenv);
++-    body_type
++-}
++-
++-fn interactive_env() -> std::io::Result<()> {
+++fn interactive_env(type_check: bool) -> std::io::Result<()> {
++     println!("\nWelcome to the snek REPL! Type \"exit\" to quit.\n");
++ 
++-    let stdin = io::stdin();
++-    let mut reader = stdin.lock();
++-    let mut define_env: HashMap<String, i64> = HashMap::new();
++-    let mut define_ptr_env: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
++-    let mut fun_defs: Vec<FunDef> = Vec::new(); // keep optionally for inspection
++-    let mut fun_ptrs: std::collections::HashMap<String, (usize, i64)> = std::collections::HashMap::new();
++-    let mut code_pages: Vec<dynasmrt::ExecutableBuffer> = Vec::new(); // keep JITed functions alive
++-
++-    loop {
++-        print!("> ");
++-        io::stdout().flush()?;
++-
++-        let mut input = String::new();
++-        match reader.read_line(&mut input) {
++-            Ok(0) => {
++-                println!("See you next time!\n");
++-                std::process::exit(1);
++-            }
++-            Ok(_) => {
++-                let input = input.trim();
++-                if input.is_empty() {
++-                    continue;
++-                }
++-
++-                match parse(input) {
++-                    Ok(sexp) => {
++-                        match std::panic::catch_unwind(|| parse_repl_entry(&sexp)) {
++-                            Ok(ReplEntry::Define(var, expr)) => {
++-                                // Evaluate expr with current function defs and define pointers (allowing calls/side-effects)
++-                                // Ensure a cell exists for every defined var
++-                                for (name, val) in define_env.iter() {
++-                                    if !define_ptr_env.contains_key(name) {
++-                                        let boxed = Box::new(*val as i64);
++-                                        let ptr = Box::into_raw(boxed) as i64;
++-                                        define_ptr_env.insert(name.clone(), ptr);
++-                                    }
++-                                }
++-                                match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
++-                                    Ok(value) => {
++-                                        // Write value into (existing or new) cell and env
++-                                        if let Some(ptr) = define_ptr_env.get(&var) {
++-                                            unsafe { *( *ptr as *mut i64) = value as i64; }
++-                                        } else {
++-                                            let boxed = Box::new(value as i64);
++-                                            let ptr = Box::into_raw(boxed) as i64;
++-                                            define_ptr_env.insert(var.clone(), ptr);
++-                                        }
++-                                        define_env.insert(var.clone(), value);
++-                                    }
++-                                    Err(e) => println!("{}", e),
++-                                }
++-                            },
++-                            Ok(ReplEntry::DefineFun(fd)) => {
++-                                // Add/replace function def
++-                                if fun_defs.iter().any(|f| f.name == fd.name) {
++-                                    // Replace existing by name
++-                                    if let Some(pos) = fun_defs.iter().position(|f| f.name == fd.name) { fun_defs.remove(pos); }
++-                                }
++-                                let arity = fd.params.len();
++-                                // Compile this function alone, using already-compiled fun_ptrs
++-                                let mut ops = dynasmrt::x64::Assembler::new().unwrap();
++-                                let start = ops.offset();
++-                                let mut lbl = 0;
++-                                let finstrs = compile_function_instrs_repl(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs);
++-                                lower_instrs_to_ops(finstrs, &mut ops);
++-                                let buf = ops.finalize().unwrap();
++-                                let ptr = buf.ptr(start) as i64;
++-                                fun_ptrs.insert(fd.name.clone(), (arity, ptr));
++-                                code_pages.push(buf);
++-                                fun_defs.push(fd);
++-                            }
++-                            Ok(ReplEntry::Exit()) => {
++-                                println!("\nSee you next time!");
++-                                std::process::exit(0);
++-                            }
++-                            Ok(ReplEntry::Expr(expr)) => {
++-                                // Evaluate expression with current function defs and define pointers
++-                                // Ensure cells exist for all current defines
++-                                for (name, val) in define_env.iter() {
++-                                    if !define_ptr_env.contains_key(name) {
++-                                        let boxed = Box::new(*val as i64);
++-                                        let ptr = Box::into_raw(boxed) as i64;
++-                                        define_ptr_env.insert(name.clone(), ptr);
++-                                    }
++-                                }
++-                                match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
++-                                    Ok(result) => println!("{}", format_value(result)),
++-                                    Err(e) => println!("{}", e),
++-                                }
++-                            }
++-                            Err(e) => {
++-                                println!("Compile error: {:?}", e);
++-                            }
++-                        }
++-                    }
++-                    Err(_) => {
++-                        println!("Invalid: Parse error");
++-                    }
++-                }
++-            }
++-            Err(e) => {
++-                println!("Error reading input: {}", e);
++-            }
++-        }
++-    }
++-}
++-
++-fn typed_interactive_env() -> std::io::Result<()> {
++-    println!("\nWelcome to the snek REPL with type checking! Type \"exit\" to quit.\n");
++-
++     let stdin = io::stdin();
++     let mut reader = stdin.lock();
++     let mut define_env: HashMap<String, i64> = HashMap::new();
++@@ -2138,7 +2000,7 @@ fn typed_interactive_env() -> std::io::Result<()> {
++     let mut fun_defs: Vec<FunDef> = Vec::new();
++     let mut fun_ptrs: std::collections::HashMap<String, (usize, i64)> = std::collections::HashMap::new();
++     let mut code_pages: Vec<dynasmrt::ExecutableBuffer> = Vec::new();
++-    let mut var_types: im::HashMap<String, Type> = im::HashMap::new(); // Track variable types
+++    let mut var_types: im::HashMap<String, Type> = im::HashMap::new(); // Track variable types for type checking
++ 
++     loop {
++         print!("> ");
++@@ -2160,133 +2022,192 @@ fn typed_interactive_env() -> std::io::Result<()> {
++                     Ok(sexp) => {
++                         match std::panic::catch_unwind(|| parse_repl_entry(&sexp)) {
++                             Ok(ReplEntry::Define(var, expr)) => {
++-                                // Type-check the expression first
++-                                let tenv = TEnv {
++-                                    vars: var_types.clone(),
++-                                    funcs: fun_defs.iter().map(|fd| {
++-                                        let param_types: Vec<Type> = fd.params.iter().map(|(_, t)| t.clone()).collect();
++-                                        (fd.name.clone(), (param_types, fd.return_type.clone()))
++-                                    }).collect(),
++-                                    input_type: Type::Any,
++-                                };
++-                                
++-                                match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
++-                                    Ok((expr_type, _)) => {
++-                                        // Type check passed, now evaluate
++-                                        for (name, val) in define_env.iter() {
++-                                            if !define_ptr_env.contains_key(name) {
++-                                                let boxed = Box::new(*val as i64);
++-                                                let ptr = Box::into_raw(boxed) as i64;
++-                                                define_ptr_env.insert(name.clone(), ptr);
++-                                            }
++-                                        }
++-                                        match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
++-                                            Ok(value) => {
++-                                                if let Some(ptr) = define_ptr_env.get(&var) {
++-                                                    unsafe { *( *ptr as *mut i64) = value as i64; }
++-                                                } else {
++-                                                    let boxed = Box::new(value as i64);
+++                                // Type-check if enabled
+++                                if type_check {
+++                                    let tenv = TEnv {
+++                                        vars: var_types.clone(),
+++                                        funcs: fun_defs.iter().map(|fd| {
+++                                            let param_types: Vec<Type> = fd.params.iter().map(|(_, t)| t.clone()).collect();
+++                                            (fd.name.clone(), (param_types, fd.return_type.clone()))
+++                                        }).collect(),
+++                                        input_type: Type::Any,
+++                                    };
+++                                    
+++                                    match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
+++                                        Ok((expr_type, _)) => {
+++                                            // Type check passed, proceed with evaluation
+++                                            for (name, val) in define_env.iter() {
+++                                                if !define_ptr_env.contains_key(name) {
+++                                                    let boxed = Box::new(*val as i64);
++                                                     let ptr = Box::into_raw(boxed) as i64;
++-                                                    define_ptr_env.insert(var.clone(), ptr);
+++                                                    define_ptr_env.insert(name.clone(), ptr);
+++                                                }
+++                                            }
+++                                            match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+++                                                Ok(value) => {
+++                                                    if let Some(ptr) = define_ptr_env.get(&var) {
+++                                                        unsafe { *( *ptr as *mut i64) = value as i64; }
+++                                                    } else {
+++                                                        let boxed = Box::new(value as i64);
+++                                                        let ptr = Box::into_raw(boxed) as i64;
+++                                                        define_ptr_env.insert(var.clone(), ptr);
+++                                                    }
+++                                                    define_env.insert(var.clone(), value);
+++                                                    var_types.insert(var.clone(), expr_type);
++                                                 }
++-                                                define_env.insert(var.clone(), value);
++-                                                var_types.insert(var.clone(), expr_type);
+++                                                Err(e) => println!("{}", e),
+++                                            }
+++                                        }
+++                                        Err(e) => {
+++                                            if let Some(msg) = e.downcast_ref::<String>() {
+++                                                println!("Type error: {}", msg);
+++                                            } else if let Some(msg) = e.downcast_ref::<&str>() {
+++                                                println!("Type error: {}", msg);
+++                                            } else {
+++                                                println!("Type error occurred");
++                                             }
++-                                            Err(e) => println!("{}", e),
++                                         }
++                                     }
++-                                    Err(e) => {
++-                                        if let Some(msg) = e.downcast_ref::<String>() {
++-                                            println!("Type error: {}", msg);
++-                                        } else if let Some(msg) = e.downcast_ref::<&str>() {
++-                                            println!("Type error: {}", msg);
++-                                        } else {
++-                                            println!("Type error occurred");
+++                                } else {
+++                                    // No type checking, just evaluate
+++                                    for (name, val) in define_env.iter() {
+++                                        if !define_ptr_env.contains_key(name) {
+++                                            let boxed = Box::new(*val as i64);
+++                                            let ptr = Box::into_raw(boxed) as i64;
+++                                            define_ptr_env.insert(name.clone(), ptr);
++                                         }
++                                     }
+++                                    match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+++                                        Ok(value) => {
+++                                            if let Some(ptr) = define_ptr_env.get(&var) {
+++                                                unsafe { *( *ptr as *mut i64) = value as i64; }
+++                                            } else {
+++                                                let boxed = Box::new(value as i64);
+++                                                let ptr = Box::into_raw(boxed) as i64;
+++                                                define_ptr_env.insert(var.clone(), ptr);
+++                                            }
+++                                            define_env.insert(var.clone(), value);
+++                                        }
+++                                        Err(e) => println!("{}", e),
+++                                    }
++                                 }
++                             },
++                             Ok(ReplEntry::DefineFun(fd)) => {
++-                                // Type-check the function
++-                                let tenv = TEnv {
++-                                    vars: im::HashMap::new(),
++-                                    funcs: fun_defs.iter().map(|f| {
++-                                        let param_types: Vec<Type> = f.params.iter().map(|(_, t)| t.clone()).collect();
++-                                        (f.name.clone(), (param_types, f.return_type.clone()))
++-                                    }).collect(),
++-                                    input_type: Type::Any,
++-                                };
++-                                
++-                                match std::panic::catch_unwind(|| tc_function(&fd, &tenv)) {
++-                                    Ok(_) => {
++-                                        // Type check passed, compile and store
++-                                        if fun_defs.iter().any(|f| f.name == fd.name) {
++-                                            if let Some(pos) = fun_defs.iter().position(|f| f.name == fd.name) { 
++-                                                fun_defs.remove(pos); 
+++                                // Type-check if enabled
+++                                if type_check {
+++                                    let tenv = TEnv {
+++                                        vars: im::HashMap::new(),
+++                                        funcs: fun_defs.iter().map(|f| {
+++                                            let param_types: Vec<Type> = f.params.iter().map(|(_, t)| t.clone()).collect();
+++                                            (f.name.clone(), (param_types, f.return_type.clone()))
+++                                        }).collect(),
+++                                        input_type: Type::Any,
+++                                    };
+++                                    
+++                                    match std::panic::catch_unwind(|| tc_function(&fd, &tenv)) {
+++                                        Ok(_) => {
+++                                            // Type check passed, compile and store
+++                                            if fun_defs.iter().any(|f| f.name == fd.name) {
+++                                                if let Some(pos) = fun_defs.iter().position(|f| f.name == fd.name) { 
+++                                                    fun_defs.remove(pos); 
+++                                                }
+++                                            }
+++                                            let arity = fd.params.len();
+++                                            let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+++                                            let start = ops.offset();
+++                                            let mut lbl = 0;
+++                                            let finstrs = compile_function_instrs_repl(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs);
+++                                            lower_instrs_to_ops(finstrs, &mut ops);
+++                                            let buf = ops.finalize().unwrap();
+++                                            let ptr = buf.ptr(start) as i64;
+++                                            fun_ptrs.insert(fd.name.clone(), (arity, ptr));
+++                                            code_pages.push(buf);
+++                                            fun_defs.push(fd);
+++                                        }
+++                                        Err(e) => {
+++                                            if let Some(msg) = e.downcast_ref::<String>() {
+++                                                println!("Type error: {}", msg);
+++                                            } else if let Some(msg) = e.downcast_ref::<&str>() {
+++                                                println!("Type error: {}", msg);
+++                                            } else {
+++                                                println!("Type error occurred");
++                                             }
++                                         }
++-                                        let arity = fd.params.len();
++-                                        let mut ops = dynasmrt::x64::Assembler::new().unwrap();
++-                                        let start = ops.offset();
++-                                        let mut lbl = 0;
++-                                        let finstrs = compile_function_instrs_repl(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs);
++-                                        lower_instrs_to_ops(finstrs, &mut ops);
++-                                        let buf = ops.finalize().unwrap();
++-                                        let ptr = buf.ptr(start) as i64;
++-                                        fun_ptrs.insert(fd.name.clone(), (arity, ptr));
++-                                        code_pages.push(buf);
++-                                        fun_defs.push(fd);
++                                     }
++-                                    Err(e) => {
++-                                        if let Some(msg) = e.downcast_ref::<String>() {
++-                                            println!("Type error: {}", msg);
++-                                        } else if let Some(msg) = e.downcast_ref::<&str>() {
++-                                            println!("Type error: {}", msg);
++-                                        } else {
++-                                            println!("Type error occurred");
+++                                } else {
+++                                    // No type checking, just compile
+++                                    if fun_defs.iter().any(|f| f.name == fd.name) {
+++                                        if let Some(pos) = fun_defs.iter().position(|f| f.name == fd.name) { 
+++                                            fun_defs.remove(pos); 
++                                         }
++                                     }
+++                                    let arity = fd.params.len();
+++                                    let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+++                                    let start = ops.offset();
+++                                    let mut lbl = 0;
+++                                    let finstrs = compile_function_instrs_repl(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs);
+++                                    lower_instrs_to_ops(finstrs, &mut ops);
+++                                    let buf = ops.finalize().unwrap();
+++                                    let ptr = buf.ptr(start) as i64;
+++                                    fun_ptrs.insert(fd.name.clone(), (arity, ptr));
+++                                    code_pages.push(buf);
+++                                    fun_defs.push(fd);
++                                 }
++                             }
++                             Ok(ReplEntry::Exit()) => {
++-                                println!("See you next time!\n");
++-                                std::process::exit(1);
+++                                println!("\nSee you next time!");
+++                                std::process::exit(0);
++                             }
++                             Ok(ReplEntry::Expr(expr)) => {
++-                                // Type-check the expression first
++-                                let tenv = TEnv {
++-                                    vars: var_types.clone(),
++-                                    funcs: fun_defs.iter().map(|fd| {
++-                                        let param_types: Vec<Type> = fd.params.iter().map(|(_, t)| t.clone()).collect();
++-                                        (fd.name.clone(), (param_types, fd.return_type.clone()))
++-                                    }).collect(),
++-                                    input_type: Type::Any,
++-                                };
++-                                
++-                                match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
++-                                    Ok((_expr_type, _)) => {
++-                                        // Type check passed, now evaluate
++-                                        for (name, val) in define_env.iter() {
++-                                            if !define_ptr_env.contains_key(name) {
++-                                                let boxed = Box::new(*val as i64);
++-                                                let ptr = Box::into_raw(boxed) as i64;
++-                                                define_ptr_env.insert(name.clone(), ptr);
+++                                // Type-check if enabled
+++                                if type_check {
+++                                    let tenv = TEnv {
+++                                        vars: var_types.clone(),
+++                                        funcs: fun_defs.iter().map(|fd| {
+++                                            let param_types: Vec<Type> = fd.params.iter().map(|(_, t)| t.clone()).collect();
+++                                            (fd.name.clone(), (param_types, fd.return_type.clone()))
+++                                        }).collect(),
+++                                        input_type: Type::Any,
+++                                    };
+++                                    
+++                                    match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
+++                                        Ok((_expr_type, _)) => {
+++                                            // Type check passed, now evaluate
+++                                            for (name, val) in define_env.iter() {
+++                                                if !define_ptr_env.contains_key(name) {
+++                                                    let boxed = Box::new(*val as i64);
+++                                                    let ptr = Box::into_raw(boxed) as i64;
+++                                                    define_ptr_env.insert(name.clone(), ptr);
+++                                                }
+++                                            }
+++                                            match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+++                                                Ok(result) => println!("{}", format_value(result)),
+++                                                Err(e) => println!("{}", e),
++                                             }
++                                         }
++-                                        match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
++-                                            Ok(result) => println!("{}", format_value(result)),
++-                                            Err(e) => println!("{}", e),
+++                                        Err(e) => {
+++                                            if let Some(msg) = e.downcast_ref::<String>() {
+++                                                println!("Type error: {}", msg);
+++                                            } else if let Some(msg) = e.downcast_ref::<&str>() {
+++                                                println!("Type error: {}", msg);
+++                                            } else {
+++                                                println!("Type error occurred");
+++                                            }
++                                         }
++                                     }
++-                                    Err(e) => {
++-                                        if let Some(msg) = e.downcast_ref::<String>() {
++-                                            println!("Type error: {}", msg);
++-                                        } else if let Some(msg) = e.downcast_ref::<&str>() {
++-                                            println!("Type error: {}", msg);
++-                                        } else {
++-                                            println!("Type error occurred");
+++                                } else {
+++                                    // No type checking, just evaluate
+++                                    for (name, val) in define_env.iter() {
+++                                        if !define_ptr_env.contains_key(name) {
+++                                            let boxed = Box::new(*val as i64);
+++                                            let ptr = Box::into_raw(boxed) as i64;
+++                                            define_ptr_env.insert(name.clone(), ptr);
++                                         }
++                                     }
+++                                    match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+++                                        Ok(result) => println!("{}", format_value(result)),
+++                                        Err(e) => println!("{}", e),
+++                                    }
++                                 }
++                             }
++                             Err(e) => {
++@@ -2300,14 +2221,13 @@ fn typed_interactive_env() -> std::io::Result<()> {
++                             }
++                         }
++                     }
++-                    Err(e) => {
++-                        println!("Parse error: {}", e);
+++                    Err(_) => {
+++                        println!("Invalid: Parse error");
++                     }
++                 }
++             }
++             Err(e) => {
++-                eprintln!("Error reading line: {}", e);
++-                return Err(e);
+++                println!("Error reading input: {}", e);
++             }
++         }
++     }
++@@ -2327,7 +2247,7 @@ fn main() -> std::io::Result<()> {
++         if args.len() > 2 {
++             panic!("Invalid arguments for \"-i\" - The interactive environment flag takes no arguments");
++         }
++-        match interactive_env() {
+++        match interactive_env(false) {
++             Err(e) => eprintln!("Error: {}", e),
++             _ => return Ok(())
++         }
++@@ -2337,7 +2257,7 @@ fn main() -> std::io::Result<()> {
++         if args.len() > 2 {
++             panic!("Invalid arguments for \"-ti\" - The typed interactive environment flag takes no arguments");
++         }
++-        match typed_interactive_env() {
+++        match interactive_env(true) {
++             Err(e) => eprintln!("Error: {}", e),
++             _ => return Ok(())
++         }
++@@ -2412,7 +2332,7 @@ fn main() -> std::io::Result<()> {
++             if args.len() != 3 {
++                 panic!("Invalid arguments for \"-t\" - Usage: program -t <in.snek>");
++             }
++-            match std::panic::catch_unwind(|| tc_program(&program)) {
+++            match std::panic::catch_unwind(|| tc_program(&program, None)) {
++                 Ok(return_type) => {
++                     println!("Type check passed!");
++                     println!("Program return type: {:?}", return_type);
++@@ -2436,7 +2356,7 @@ fn main() -> std::io::Result<()> {
++             }
++             
++             // First typecheck
++-            match std::panic::catch_unwind(|| tc_program(&program)) {
+++            match std::panic::catch_unwind(|| tc_program(&program, None)) {
++                 Ok(_return_type) => {
++                     println!("Type check passed!");
++                 }
++@@ -2480,7 +2400,7 @@ fn main() -> std::io::Result<()> {
++             };
++             
++             // Typecheck with input type
++-            match std::panic::catch_unwind(|| tc_program_with_input(&program, input_type)) {
+++            match std::panic::catch_unwind(|| tc_program(&program, Some(input_type))) {
++                 Ok(_return_type) => {
++                     println!("Type check passed!");
++                 }
++@@ -2529,7 +2449,7 @@ fn main() -> std::io::Result<()> {
++             };
++             
++             // Typecheck with input type
++-            match std::panic::catch_unwind(|| tc_program_with_input(&program, input_type)) {
+++            match std::panic::catch_unwind(|| tc_program(&program, Some(input_type))) {
++                 Ok(_return_type) => {
++                     println!("Type check passed!");
++                 }
+diff --git a/src/main.rs b/src/main.rs
+index 7101e0a..8a4acd3 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -193,6 +193,7 @@ enum Instr {
+     Push(Reg),
+     Pop(Reg),
+     CallPrint(),         // call snek_print with value in rax
++    Comment(String),     // assembly comment for readability
+ 
+ }
+ 
+@@ -663,6 +664,7 @@ fn instr_to_str(i: &Instr) -> String {
+         Instr::Push(r) => format!("push {}", reg_to_str(r)),
+         Instr::Pop(r) => format!("pop {}", reg_to_str(r)),
+         Instr::CallPrint() => format!("push rdi\nmov rdi, rax\ncall snek_print\npop rdi"),
++        Instr::Comment(text) => format!("// {}", text),
+     }
+ }
+ 
+@@ -819,6 +821,9 @@ fn instr_to_asm(i: &Instr, ops: &mut dynasmrt::x64::Assembler) {
+             let print_fn_ptr: i64 = snek_print_host as i64;
+             dynasm!(ops ; .arch x64 ; mov rdi, rax ; mov rax, QWORD print_fn_ptr; call rax);
+         },
++        Instr::Comment(_) => {
++            // Comments don't generate any machine code, they're only for assembly readability
++        },
+     }
+ }
+ 
+@@ -892,7 +897,6 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String,
+                         match define_env.get(s) {
+                             Some(value) => vec![Instr::IMov(Val::Reg(Reg::Rax), Val::I64(*value))],
+                             _ => panic!("Unbound variable indentifier {}", s),
+-                            //_ => vec![Instr::CallError(ERROR_UNBOUND_VARIABLE)],
+                         }
+                     }
+                 }
+@@ -908,6 +912,7 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String,
+                     println!("ERROR | Duplicate binding: {}", name);
+                     break;
+                 }
++                instr_vec.push(Instr::Comment(format!("Let Binding: {}", name)));
+                 instr_vec.extend(compile_to_instrs_inner(bind_expr, stack_buff + i, &env2, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
+                 // store into local slot [rbp - (stack_buff + i)]
+                 let off = -(stack_buff + i);
+@@ -936,9 +941,11 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String,
+             instr_vec
+         }
+         Expr::Break(val) => {
++            let mut instr_vec: Vec<Instr> = Vec::new();
+             match break_label {
+                 Some(label_name) => {
+-                    let mut instr_vec: Vec<Instr> = compile_to_instrs_inner(val, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs);
++                    instr_vec.push(Instr::Comment(format!("Break Statement:")));
++                    instr_vec.extend(compile_to_instrs_inner(val, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
+                     instr_vec.push(Instr::Jmp(label_name.clone()));
+                     instr_vec
+                 }
+@@ -949,7 +956,10 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String,
+             }
+         }
+         Expr::Set(name, rhs) => {
+-            let mut instr_vec: Vec<Instr> = compile_to_instrs_inner(rhs, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs);
++            let mut instr_vec: Vec<Instr> = Vec::new();
++            instr_vec.push(Instr::Comment(format!("Set! Change: {}", name)));
++            instr_vec.extend(compile_to_instrs_inner(rhs, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
++            instr_vec.push(Instr::Comment(format!("{} binded to be equal to above", name)));
+             match env.get(name) {
+                 Some(off) => {
+                     instr_vec.push(Instr::MovToMem(Reg::Rbp, *off, Val::Reg(Reg::Rax)));
+@@ -968,6 +978,7 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String,
+         }
+         Expr::Block(exprs) => {
+             let mut instr_vec: Vec<Instr> = Vec::new();
++            instr_vec.push(Instr::Comment(format!("Block:")));
+             for ex in exprs {
+                 instr_vec.extend(compile_to_instrs_inner(ex, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
+             }
+diff --git a/tests/comment_example.s b/tests/comment_example.s
+new file mode 100644
+index 0000000..ce69158
+--- /dev/null
++++ b/tests/comment_example.s
+@@ -0,0 +1,42 @@
++section .text
++extern snek_error, snek_print
++global our_code_starts_here
++our_code_starts_here:
++push rbp
++mov rbp, rsp
++sub rsp, 24
++; Let bindings start
++; Binding: x
++mov rax, 10
++mov [rbp - 8], rax
++; Binding: y
++mov rax, 20
++mov [rbp - 16], rax
++; Let body expression
++mov rax, [rbp - 8]
++mov [rbp - 24], rax
++mov rax, [rbp - 16]
++mov rcx, [rbp - 24]
++cmp rax, 3
++jz err_ar_0
++cmp rax, 1
++jz err_ar_0
++cmp rcx, 3
++jz err_ar_0
++cmp rcx, 1
++jz err_ar_0
++jmp ok_ar_0
++err_ar_0:
++mov rdi, -1
++call snek_error
++ok_ar_0:
++add rax, rcx
++jo of_ar_1
++jmp cont_ar_1
++of_ar_1:
++mov rdi, -9
++call snek_error
++cont_ar_1:
++add rsp, 24
++pop rbp
++ret
+diff --git a/tests/comment_example.snek b/tests/comment_example.snek
+new file mode 100644
+index 0000000..d2d8600
+--- /dev/null
++++ b/tests/comment_example.snek
+@@ -0,0 +1,2 @@
++(let ((x 5) (y 10))
++  (+ x y))
+diff --git a/tests/gradescope2.s b/tests/gradescope2.s
+index 8172cc2..194c3c3 100644
+--- a/tests/gradescope2.s
++++ b/tests/gradescope2.s
+@@ -5,8 +5,10 @@ fun_sum_up_to:
+ push rbp
+ mov rbp, rsp
+ sub rsp, 24
++// Let Binding: i
+ mov rax, 0
+ mov [rbp - 8], rax
++// Let Binding: acc
+ mov rax, 0
+ mov [rbp - 16], rax
+ loop_start_0:
+@@ -38,10 +40,13 @@ cmp rax, 1
+ jz if_else_2
+ jmp if_err_2
+ if_then_2:
++// Break Statement:
+ mov rax, [rbp - 16]
+ jmp loop_end_0
+ jmp if_end_2
+ if_else_2:
++// Block:
++// Set! Change: acc
+ mov rax, [rbp - 16]
+ mov [rbp - 24], rax
+ mov rax, [rbp - 8]
+@@ -66,7 +71,9 @@ of_ar_4:
+ mov rdi, -9
+ call snek_error
+ cont_ar_4:
++// acc binded to be equal to above
+ mov [rbp - 16], rax
++// Set! Change: i
+ mov rax, [rbp - 8]
+ mov [rbp - 24], rax
+ mov rax, 2
+@@ -91,6 +98,7 @@ of_ar_6:
+ mov rdi, -9
+ call snek_error
+ cont_ar_6:
++// i binded to be equal to above
+ mov [rbp - 8], rax
+ jmp if_end_2
+ if_err_2:
+@@ -106,8 +114,10 @@ fun_factorial:
+ push rbp
+ mov rbp, rsp
+ sub rsp, 24
++// Let Binding: i
+ mov rax, 2
+ mov [rbp - 8], rax
++// Let Binding: acc
+ mov rax, 2
+ mov [rbp - 16], rax
+ loop_start_7:
+@@ -139,10 +149,13 @@ cmp rax, 1
+ jz if_else_9
+ jmp if_err_9
+ if_then_9:
++// Break Statement:
+ mov rax, [rbp - 16]
+ jmp loop_end_7
+ jmp if_end_9
+ if_else_9:
++// Block:
++// Set! Change: acc
+ mov rax, [rbp - 16]
+ mov [rbp - 24], rax
+ mov rax, [rbp - 8]
+@@ -170,7 +183,9 @@ of_ar_11:
+ mov rdi, -9
+ call snek_error
+ cont_ar_11:
++// acc binded to be equal to above
+ mov [rbp - 16], rax
++// Set! Change: i
+ mov rax, [rbp - 8]
+ mov [rbp - 24], rax
+ mov rax, 2
+@@ -195,6 +210,7 @@ of_ar_13:
+ mov rdi, -9
+ call snek_error
+ cont_ar_13:
++// i binded to be equal to above
+ mov [rbp - 8], rax
+ jmp if_end_9
+ if_err_9:
+@@ -210,6 +226,7 @@ fun_print_table:
+ push rbp
+ mov rbp, rsp
+ sub rsp, 16
++// Let Binding: i
+ mov rax, 2
+ mov [rbp - 8], rax
+ loop_start_14:
+@@ -241,10 +258,12 @@ cmp rax, 1
+ jz if_else_16
+ jmp if_err_16
+ if_then_16:
++// Break Statement:
+ mov rax, [rbp - 8]
+ jmp loop_end_14
+ jmp if_end_16
+ if_else_16:
++// Block:
+ mov rax, [rbp - 8]
+ push rax
+ call fun_sum_up_to
+@@ -261,6 +280,7 @@ push rdi
+ mov rdi, rax
+ call snek_print
+ pop rdi
++// Set! Change: i
+ mov rax, [rbp - 8]
+ mov [rbp - 16], rax
+ mov rax, 2
+@@ -285,6 +305,7 @@ of_ar_18:
+ mov rdi, -9
+ call snek_error
+ cont_ar_18:
++// i binded to be equal to above
+ mov [rbp - 8], rax
+ jmp if_end_16
+ if_err_16:
