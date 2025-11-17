@@ -193,6 +193,7 @@ enum Instr {
     Push(Reg),
     Pop(Reg),
     CallPrint(),         // call snek_print with value in rax
+    Comment(String),     // assembly comment for readability
 
 }
 
@@ -663,6 +664,7 @@ fn instr_to_str(i: &Instr) -> String {
         Instr::Push(r) => format!("push {}", reg_to_str(r)),
         Instr::Pop(r) => format!("pop {}", reg_to_str(r)),
         Instr::CallPrint() => format!("push rdi\nmov rdi, rax\ncall snek_print\npop rdi"),
+        Instr::Comment(text) => format!("// {}", text),
     }
 }
 
@@ -819,6 +821,9 @@ fn instr_to_asm(i: &Instr, ops: &mut dynasmrt::x64::Assembler) {
             let print_fn_ptr: i64 = snek_print_host as i64;
             dynasm!(ops ; .arch x64 ; mov rdi, rax ; mov rax, QWORD print_fn_ptr; call rax);
         },
+        Instr::Comment(_) => {
+            // Comments don't generate any machine code, they're only for assembly readability
+        },
     }
 }
 
@@ -892,7 +897,6 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String, 
                         match define_env.get(s) {
                             Some(value) => vec![Instr::IMov(Val::Reg(Reg::Rax), Val::I64(*value))],
                             _ => panic!("Unbound variable indentifier {}", s),
-                            //_ => vec![Instr::CallError(ERROR_UNBOUND_VARIABLE)],
                         }
                     }
                 }
@@ -908,6 +912,7 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String, 
                     println!("ERROR | Duplicate binding: {}", name);
                     break;
                 }
+                instr_vec.push(Instr::Comment(format!("Let Binding: {}", name)));
                 instr_vec.extend(compile_to_instrs_inner(bind_expr, stack_buff + i, &env2, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
                 // store into local slot [rbp - (stack_buff + i)]
                 let off = -(stack_buff + i);
@@ -936,9 +941,11 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String, 
             instr_vec
         }
         Expr::Break(val) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
             match break_label {
                 Some(label_name) => {
-                    let mut instr_vec: Vec<Instr> = compile_to_instrs_inner(val, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs);
+                    instr_vec.push(Instr::Comment(format!("Break Statement:")));
+                    instr_vec.extend(compile_to_instrs_inner(val, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
                     instr_vec.push(Instr::Jmp(label_name.clone()));
                     instr_vec
                 }
@@ -949,7 +956,10 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String, 
             }
         }
         Expr::Set(name, rhs) => {
-            let mut instr_vec: Vec<Instr> = compile_to_instrs_inner(rhs, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs);
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            instr_vec.push(Instr::Comment(format!("Set! Change: {}", name)));
+            instr_vec.extend(compile_to_instrs_inner(rhs, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
+            instr_vec.push(Instr::Comment(format!("{} binded to be equal to above", name)));
             match env.get(name) {
                 Some(off) => {
                     instr_vec.push(Instr::MovToMem(Reg::Rbp, *off, Val::Reg(Reg::Rax)));
@@ -968,6 +978,7 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String, 
         }
         Expr::Block(exprs) => {
             let mut instr_vec: Vec<Instr> = Vec::new();
+            instr_vec.push(Instr::Comment(format!("Block:")));
             for ex in exprs {
                 instr_vec.extend(compile_to_instrs_inner(ex, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs));
             }
