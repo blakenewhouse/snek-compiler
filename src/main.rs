@@ -664,7 +664,7 @@ fn instr_to_str(i: &Instr) -> String {
         Instr::Push(r) => format!("push {}", reg_to_str(r)),
         Instr::Pop(r) => format!("pop {}", reg_to_str(r)),
         Instr::CallPrint() => format!("push rdi\nmov rdi, rax\ncall snek_print\npop rdi"),
-        Instr::Comment(text) => format!("// {}", text),
+        Instr::Comment(text) => format!("; {}", text),
     }
 }
 

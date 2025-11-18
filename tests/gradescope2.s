@@ -5,10 +5,10 @@ fun_sum_up_to:
 push rbp
 mov rbp, rsp
 sub rsp, 24
-// Let Binding: i
+; Let Binding: i
 mov rax, 0
 mov [rbp - 8], rax
-// Let Binding: acc
+; Let Binding: acc
 mov rax, 0
 mov [rbp - 16], rax
 loop_start_0:
@@ -40,13 +40,13 @@ cmp rax, 1
 jz if_else_2
 jmp if_err_2
 if_then_2:
-// Break Statement:
+; Break Statement:
 mov rax, [rbp - 16]
 jmp loop_end_0
 jmp if_end_2
 if_else_2:
-// Block:
-// Set! Change: acc
+; Block:
+; Set! Change: acc
 mov rax, [rbp - 16]
 mov [rbp - 24], rax
 mov rax, [rbp - 8]
@@ -71,9 +71,9 @@ of_ar_4:
 mov rdi, -9
 call snek_error
 cont_ar_4:
-// acc binded to be equal to above
+; acc binded to be equal to above
 mov [rbp - 16], rax
-// Set! Change: i
+; Set! Change: i
 mov rax, [rbp - 8]
 mov [rbp - 24], rax
 mov rax, 2
@@ -98,7 +98,7 @@ of_ar_6:
 mov rdi, -9
 call snek_error
 cont_ar_6:
-// i binded to be equal to above
+; i binded to be equal to above
 mov [rbp - 8], rax
 jmp if_end_2
 if_err_2:
@@ -114,10 +114,10 @@ fun_factorial:
 push rbp
 mov rbp, rsp
 sub rsp, 24
-// Let Binding: i
+; Let Binding: i
 mov rax, 2
 mov [rbp - 8], rax
-// Let Binding: acc
+; Let Binding: acc
 mov rax, 2
 mov [rbp - 16], rax
 loop_start_7:
@@ -149,13 +149,13 @@ cmp rax, 1
 jz if_else_9
 jmp if_err_9
 if_then_9:
-// Break Statement:
+; Break Statement:
 mov rax, [rbp - 16]
 jmp loop_end_7
 jmp if_end_9
 if_else_9:
-// Block:
-// Set! Change: acc
+; Block:
+; Set! Change: acc
 mov rax, [rbp - 16]
 mov [rbp - 24], rax
 mov rax, [rbp - 8]
@@ -183,9 +183,9 @@ of_ar_11:
 mov rdi, -9
 call snek_error
 cont_ar_11:
-// acc binded to be equal to above
+; acc binded to be equal to above
 mov [rbp - 16], rax
-// Set! Change: i
+; Set! Change: i
 mov rax, [rbp - 8]
 mov [rbp - 24], rax
 mov rax, 2
@@ -210,7 +210,7 @@ of_ar_13:
 mov rdi, -9
 call snek_error
 cont_ar_13:
-// i binded to be equal to above
+; i binded to be equal to above
 mov [rbp - 8], rax
 jmp if_end_9
 if_err_9:
@@ -226,7 +226,7 @@ fun_print_table:
 push rbp
 mov rbp, rsp
 sub rsp, 16
-// Let Binding: i
+; Let Binding: i
 mov rax, 2
 mov [rbp - 8], rax
 loop_start_14:
@@ -258,12 +258,12 @@ cmp rax, 1
 jz if_else_16
 jmp if_err_16
 if_then_16:
-// Break Statement:
+; Break Statement:
 mov rax, [rbp - 8]
 jmp loop_end_14
 jmp if_end_16
 if_else_16:
-// Block:
+; Block:
 mov rax, [rbp - 8]
 push rax
 call fun_sum_up_to
@@ -280,7 +280,7 @@ push rdi
 mov rdi, rax
 call snek_print
 pop rdi
-// Set! Change: i
+; Set! Change: i
 mov rax, [rbp - 8]
 mov [rbp - 16], rax
 mov rax, 2
@@ -305,7 +305,7 @@ of_ar_18:
 mov rdi, -9
 call snek_error
 cont_ar_18:
-// i binded to be equal to above
+; i binded to be equal to above
 mov [rbp - 8], rax
 jmp if_end_16
 if_err_16:
