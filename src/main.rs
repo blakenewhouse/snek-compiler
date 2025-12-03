@@ -1093,6 +1093,7 @@ fn compile_to_instrs_inner(e: &Expr, stack_buff: i32, env: &im::HashMap<String, 
                 }
                 Op1::Print => {
                     // value already in rax
+                    instr_vec.push(Instr::Comment(format!("Print:")));
                     instr_vec.push(Instr::CallPrint());
                 }
             }
@@ -1758,7 +1759,7 @@ fn union(t1: Type, t2: Type) -> Type {
 fn subtype(t1: Type, t2: Type) -> bool {
     match (t1, t2) {
         (_, Type::Any) => true,
-        (Type::Nothing, _) => false,
+        (Type::Nothing, _) => true, //fixed silly logic error
         (t1, t2) => t1 == t2
     }
 }
@@ -2036,7 +2037,7 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                 // Type-check if enabled
                                 if type_check {
                                     let tenv = TEnv {
-                                        vars: var_types.clone(),
+                                        vars: var_types.clone(), //fixed to include previously defined var types
                                         funcs: fun_defs.iter().map(|fd| {
                                             let param_types: Vec<Type> = fd.params.iter().map(|(_, t)| t.clone()).collect();
                                             (fd.name.clone(), (param_types, fd.return_type.clone()))
@@ -2107,7 +2108,7 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                 // Type-check if enabled
                                 if type_check {
                                     let tenv = TEnv {
-                                        vars: im::HashMap::new(),
+                                        vars: var_types.clone(), //fixed to include previously defined var types
                                         funcs: fun_defs.iter().map(|f| {
                                             let param_types: Vec<Type> = f.params.iter().map(|(_, t)| t.clone()).collect();
                                             (f.name.clone(), (param_types, f.return_type.clone()))
