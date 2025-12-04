@@ -1,0 +1,5 @@
+(fun (m (a : Num) (b : Any)) -> Num
+  (let ((factor (if (isbool b) (if (cast Bool b) 1 -1) (cast Num b))))
+    (* a factor)))
+
+(m 4 input)

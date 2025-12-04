@@ -1,0 +1,12 @@
+(fun (f x y z)
+  (mult (abs x) (abs y) (abs z)))
+
+(fun (abs a) (if (< a 0) (* -1 a) a))
+
+(fun (mult m n p)
+  (let ((t1 (* m n))) (* t1 p)))
+
+(block
+ (print (f 1 2 3))
+ (print (f -1 -2 -3))
+ (print (f 1 -2 3)))
