@@ -1,0 +1,31 @@
+; Test all four optimization rules
+
+; Rule 1: if (isbool v) with v:Bool - then branch is taken
+(fun (rule1 (x : Bool)) -> Num
+  (if (isbool x) 
+    42
+    (+ x 10)))  ; This would be type error but not checked
+
+; Rule 2: if (isbool v) with v:Num - else branch is taken  
+(fun (rule2 (x : Num)) -> Num
+  (if (isbool x) 
+    (+ x true)  ; This would be type error but not checked
+    (+ x 10)))
+
+; Rule 3: if (isnum v) with v:Bool - else branch is taken
+(fun (rule3 (x : Bool)) -> Num
+  (if (isnum x) 
+    (+ x 10)    ; This would be type error but not checked
+    42))
+
+; Rule 4: if (isnum v) with v:Num - then branch is taken
+(fun (rule4 (x : Num)) -> Num
+  (if (isnum x) 
+    (+ x 10)
+    (+ x true)))  ; This would be type error but not checked
+
+(block
+  (print (rule1 true))
+  (print (rule2 5))
+  (print (rule3 false))
+  (rule4 7))

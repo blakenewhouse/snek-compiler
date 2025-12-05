@@ -41,7 +41,7 @@ pub extern "C" fn snek_error_host(errcode: i64) {
         -19 => "bad cast",
         _ => unreachable!(),
     };
-    eprintln!("an error ocurred: {}", err_str);
+    eprintln!("an error occurred: {}", err_str);
     std::process::exit(1);
 }
 

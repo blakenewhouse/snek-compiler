@@ -1,0 +1,7 @@
+; Test that normal if statements still work correctly
+(fun (normal_if (x : Num) (y : Num)) -> Num
+  (if (> x y)
+    x
+    y))
+
+(normal_if 5 10)

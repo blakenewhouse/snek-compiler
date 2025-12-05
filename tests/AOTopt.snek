@@ -1,0 +1,20 @@
+(block 
+    (let ((a 10) (b 10)) (+ a b))
+
+    (let ((c true) (d 19)) 
+        (block (isbool c) (isnum c) (isbool d) (isnum d))
+    )
+
+    (let ((e false) (f 12)) 
+        (block
+            (if (isbool e) (print (= e false)) (print (+ e 1)))
+            (if (isbool f) (print (= f false)) (print (+ f 2)))
+            (if (isnum e) (print (> e 11)) (print (= e true)))
+            (if (isnum f) (print (> f 11)) (print (= f true)))
+        )
+    )
+
+    (let ((g true))
+        (print (= true (cast Bool g)))
+    )
+)

@@ -71,7 +71,7 @@ extern "C" fn snek_error_host(errcode: i64) {
         -19 => "bad cast",
         _ => unreachable!(),
     };
-    eprintln!("an error ocurred: {}", err_str);
+    eprintln!("an error occurred: {}", err_str);
     std::process::exit(1);
 }
 
@@ -1421,12 +1421,572 @@ fn compile_entry_instrs(body: &Expr, fun_sigs: &std::collections::HashMap<String
     instrs
 }
 
+// Type-directed optimized compilation
+fn compile_to_instrs_opt(e: &Expr, stack_buff: i32, env: &im::HashMap<String, i32>, define_env: &im::HashMap<String, i64>, define_ptr_env: &std::collections::HashMap<String, i64>, lbl: &mut i32, break_label: Option<&String>, fun_labels: &std::collections::HashMap<String, (usize, String)>, fun_ptrs: &std::collections::HashMap<String, (usize, i64)>, tenv: &TEnv) -> Vec<Instr> {
+    match e {
+        Expr::Num(n) => vec![Instr::IMov(Val::Reg(Reg::Rax), Val::I64(tag_number(*n)))],
+        Expr::Boolean(b) => vec![Instr::IMov(Val::Reg(Reg::Rax), Val::I64(tag_boolean(*b)))],
+        Expr::Input => vec![Instr::IMov(Val::Reg(Reg::Rax), Val::Reg(Reg::Rdi))],
+        Expr::Id(s) => {
+            match env.get(s) {
+                Some(off) => vec![Instr::MovFromMem(Val::Reg(Reg::Rax), Reg::Rbp, *off)],
+                _ => {
+                    if let Some(ptr) = define_ptr_env.get(s) {
+                        vec![
+                            Instr::IMov(Val::Reg(Reg::Rax), Val::I64(*ptr as i64)),
+                            Instr::MovFromHeap(Val::Reg(Reg::Rax), Val::Reg(Reg::Rax)),
+                        ]
+                    } else {
+                        match define_env.get(s) {
+                            Some(value) => vec![Instr::IMov(Val::Reg(Reg::Rax), Val::I64(*value))],
+                            _ => panic!("Unbound variable indentifier {}", s),
+                        }
+                    }
+                }
+            }
+        },
+        Expr::Let(bindings, body_expr) => {
+            let mut env2 = env.clone();
+            let mut tenv2 = tenv.clone();
+            let mut instr_vec:Vec<Instr> = Vec::new();
+            let mut dup_vec:Vec<String> = Vec::new();
+            let mut i = 0;
+            for (name, bind_expr) in bindings {
+                if dup_vec.contains(name) {
+                    println!("ERROR | Duplicate binding: {}", name);
+                    break;
+                }
+                instr_vec.push(Instr::Comment(format!("Let Binding: {}", name)));
+                instr_vec.extend(compile_to_instrs_opt(bind_expr, stack_buff + i, &env2, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, &tenv2));
+                // Store and update environments
+                let off = -(stack_buff + i);
+                instr_vec.push(Instr::MovToMem(Reg::Rbp, off, Val::Reg(Reg::Rax)));
+                env2.insert(name.clone(), off);
+                // Track type for optimizations
+                let (bind_type, _) = tc(bind_expr, &tenv2);
+                tenv2.vars.insert(name.clone(), bind_type);
+                dup_vec.push(name.clone());
+                i += 8;
+            }
+            instr_vec.extend(compile_to_instrs_opt(body_expr, stack_buff + i, &env2, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, &tenv2));
+            instr_vec
+        },
+        Expr::Loop(body) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            let start_l = format!("loop_start_{}", *lbl);
+            let end_l   = format!("loop_end_{}", *lbl);
+            *lbl += 1;
+            instr_vec.push(Instr::Label(start_l.clone()));
+            instr_vec.extend(compile_to_instrs_opt(body, stack_buff, env, define_env, define_ptr_env, lbl, Some(&end_l), fun_labels, fun_ptrs, tenv));
+            instr_vec.push(Instr::Jmp(start_l.clone()));
+            instr_vec.push(Instr::Label(end_l.clone()));
+            instr_vec
+        }
+        Expr::Break(val) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            match break_label {
+                Some(label_name) => {
+                    instr_vec.push(Instr::Comment(format!("Break Statement:")));
+                    instr_vec.extend(compile_to_instrs_opt(val, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                    instr_vec.push(Instr::Jmp(label_name.clone()));
+                    instr_vec
+                }
+                None => {
+                    vec![Instr::CallError(ERROR_LOOPLESS_BREAK)]
+                }
+            }
+        }
+        Expr::Set(name, rhs) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            instr_vec.push(Instr::Comment(format!("Set! Change: {}", name)));
+            instr_vec.extend(compile_to_instrs_opt(rhs, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+            instr_vec.push(Instr::Comment(format!("{} binded to be equal to above", name)));
+            match env.get(name) {
+                Some(off) => {
+                    instr_vec.push(Instr::MovToMem(Reg::Rbp, *off, Val::Reg(Reg::Rax)));
+                }
+                None => {
+                    if let Some(ptr) = define_ptr_env.get(name) {
+                        instr_vec.push(Instr::IMov(Val::Reg(Reg::Rcx), Val::I64(*ptr as i64)));
+                        instr_vec.push(Instr::MovToHeap(Val::Reg(Reg::Rcx), Val::Reg(Reg::Rax)));
+                    } else {
+                        instr_vec.push(Instr::CallError(ERROR_UNBOUND_VARIABLE));
+                    }
+                }
+            }
+            instr_vec
+        }
+        Expr::Block(exprs) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            instr_vec.push(Instr::Comment(format!("Block:")));
+            for ex in exprs {
+                instr_vec.extend(compile_to_instrs_opt(ex, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+            }
+            instr_vec
+        }
+        
+        // OPTIMIZATION 3: Skip condition and unreachable branch for isbool/isnum with known types
+        Expr::If(cond, thn, els) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            
+            // Check for optimizable patterns
+            let optimization = match cond.as_ref() {
+                Expr::UnOp(Op1::IsBool, inner) | Expr::UnOp(Op1::IsNum, inner) => {
+                    let (inner_type, _) = tc(inner, tenv);
+                    Some((cond.as_ref().clone(), inner_type))
+                }
+                _ => None,
+            };
+            
+            match optimization {
+                Some((Expr::UnOp(Op1::IsBool, _), Type::Bool)) => {
+                    // (if (isbool v) e1 e2) where v:Bool => always take then branch
+                    instr_vec.push(Instr::Comment(format!("Optimized: isbool with Bool - skip condition")));
+                    instr_vec.extend(compile_to_instrs_opt(thn, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                }
+                Some((Expr::UnOp(Op1::IsBool, _), Type::Num)) => {
+                    // (if (isbool v) e1 e2) where v:Num => always take else branch
+                    instr_vec.push(Instr::Comment(format!("Optimized: isbool with Num - skip condition")));
+                    instr_vec.extend(compile_to_instrs_opt(els, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                }
+                Some((Expr::UnOp(Op1::IsNum, _), Type::Num)) => {
+                    // (if (isnum v) e1 e2) where v:Num => always take then branch
+                    instr_vec.push(Instr::Comment(format!("Optimized: isnum with Num - skip condition")));
+                    instr_vec.extend(compile_to_instrs_opt(thn, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                }
+                Some((Expr::UnOp(Op1::IsNum, _), Type::Bool)) => {
+                    // (if (isnum v) e1 e2) where v:Bool => always take else branch
+                    instr_vec.push(Instr::Comment(format!("Optimized: isnum with Bool - skip condition")));
+                    instr_vec.extend(compile_to_instrs_opt(els, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                }
+                _ => {
+                    // Regular if compilation
+                    instr_vec.extend(compile_to_instrs_opt(cond, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+
+                    let then_l = format!("if_then_{}", *lbl);
+                    let else_l = format!("if_else_{}", *lbl);
+                    let end_l  = format!("if_end_{}", *lbl);
+                    let err_l  = format!("if_err_{}", *lbl);
+                    *lbl += 1;
+
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                    instr_vec.push(Instr::Jz(then_l.clone()));
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                    instr_vec.push(Instr::Jz(else_l.clone()));
+                    instr_vec.push(Instr::Jmp(err_l.clone()));
+
+                    instr_vec.push(Instr::Label(then_l.clone()));
+                    instr_vec.extend(compile_to_instrs_opt(thn, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                    instr_vec.push(Instr::Jmp(end_l.clone()));
+
+                    instr_vec.push(Instr::Label(else_l.clone()));
+                    instr_vec.extend(compile_to_instrs_opt(els, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                    instr_vec.push(Instr::Jmp(end_l.clone()));
+
+                    instr_vec.push(Instr::Label(err_l.clone()));
+                    instr_vec.push(Instr::CallError(ERROR_IF_NOT_BOOL));
+
+                    instr_vec.push(Instr::Label(end_l.clone()));
+                }
+            }
+            
+            instr_vec
+        }
+        
+        Expr::UnOp(op, subexpr) => {
+            match op {
+                // OPTIMIZATION 2: Simplify isbool/isnum to true/false if type is known
+                Op1::IsBool => {
+                    let (subexpr_type, _) = tc(subexpr, tenv);
+                    match subexpr_type {
+                        Type::Bool => {
+                            vec![
+                                Instr::Comment(format!("Optimized: isbool with Bool => true")),
+                                Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32))
+                            ]
+                        }
+                        Type::Num => {
+                            vec![
+                                Instr::Comment(format!("Optimized: isbool with Num => false")),
+                                Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32))
+                            ]
+                        }
+                        _ => {
+                            // Type is Any or Nothing, use runtime check - same as original
+                            let mut instr_vec: Vec<Instr> = compile_to_instrs_opt(subexpr, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv);
+                            let set_true = format!("isbool_set_true_{}", *lbl);
+                            let done = format!("isbool_done_{}", *lbl); *lbl += 1;
+                            instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                            instr_vec.push(Instr::Jz(set_true.clone()));
+                            instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                            instr_vec.push(Instr::Jz(set_true.clone()));
+                            instr_vec.push(Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                            instr_vec.push(Instr::Jmp(done.clone()));
+                            instr_vec.push(Instr::Label(set_true));
+                            instr_vec.push(Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                            instr_vec.push(Instr::Label(done));
+                            instr_vec
+                        }
+                    }
+                }
+                Op1::IsNum => {
+                    let (subexpr_type, _) = tc(subexpr, tenv);
+                    match subexpr_type {
+                        Type::Num => {
+                            vec![
+                                Instr::Comment(format!("Optimized: isnum with Num => true")),
+                                Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32))
+                            ]
+                        }
+                        Type::Bool => {
+                            vec![
+                                Instr::Comment(format!("Optimized: isnum with Bool => false")),
+                                Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32))
+                            ]
+                        }
+                        _ => {
+                            // Type is Any or Nothing, use runtime check - same as original
+                            let mut instr_vec: Vec<Instr> = compile_to_instrs_opt(subexpr, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv);
+                            let set_false = format!("isnum_set_false_{}", *lbl);
+                            let done = format!("isnum_done_{}", *lbl); *lbl += 1;
+                            instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                            instr_vec.push(Instr::Jz(set_false.clone()));
+                            instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                            instr_vec.push(Instr::Jz(set_false.clone()));
+                            instr_vec.push(Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                            instr_vec.push(Instr::Jmp(done.clone()));
+                            instr_vec.push(Instr::Label(set_false));
+                            instr_vec.push(Instr::IMov(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                            instr_vec.push(Instr::Label(done));
+                            instr_vec
+                        }
+                    }
+                }
+                Op1::Add1 | Op1::Sub1 => {
+                    let mut instr_vec: Vec<Instr> = compile_to_instrs_opt(subexpr, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv);
+                    
+                    // OPTIMIZATION 1: Skip tag check if we know the type is Num
+                    let (subexpr_type, _) = tc(subexpr, tenv);
+                    if !matches!(subexpr_type, Type::Num) {
+                        // Only emit tag check if type is not definitively Num
+                        let err_l = format!("err_unop_{}", *lbl);
+                        let ok_l = format!("ok_unop_{}", *lbl); *lbl += 1;
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::Jmp(ok_l.clone()));
+                        instr_vec.push(Instr::Label(err_l));
+                        instr_vec.push(Instr::CallError(ERROR_ARITH_NOT_NUM));
+                        instr_vec.push(Instr::Label(ok_l));
+                    } else {
+                        instr_vec.push(Instr::Comment(format!("Optimized: skip tag check for {:?} (known Num)", op)));
+                    }
+
+                    match op {
+                        Op1::Add1 => {
+                            let of_l = format!("of_unop_{}", *lbl);
+                            let cont_l = format!("cont_unop_{}", *lbl); *lbl += 1;
+                            instr_vec.push(Instr::IAdd(Val::Reg(Reg::Rax), Val::I32(2)));
+                            instr_vec.push(Instr::JO(of_l.clone()));
+                            instr_vec.push(Instr::Jmp(cont_l.clone()));
+                            instr_vec.push(Instr::Label(of_l));
+                            instr_vec.push(Instr::CallError(ERROR_OVERFLOW));
+                            instr_vec.push(Instr::Label(cont_l));
+                        },
+                        Op1::Sub1 => {
+                            let of_l = format!("of_unop_{}", *lbl);
+                            let cont_l = format!("cont_unop_{}", *lbl); *lbl += 1;
+                            instr_vec.push(Instr::ISub(Val::Reg(Reg::Rax), Val::I32(2)));
+                            instr_vec.push(Instr::JO(of_l.clone()));
+                            instr_vec.push(Instr::Jmp(cont_l.clone()));
+                            instr_vec.push(Instr::Label(of_l));
+                            instr_vec.push(Instr::CallError(ERROR_OVERFLOW));
+                            instr_vec.push(Instr::Label(cont_l));
+                        },
+                        _ => unreachable!(),
+                    }
+                    instr_vec
+                }
+                Op1::Print => {
+                    let mut instr_vec: Vec<Instr> = compile_to_instrs_opt(subexpr, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv);
+                    instr_vec.push(Instr::Comment(format!("Print:")));
+                    instr_vec.push(Instr::CallPrint());
+                    instr_vec
+                }
+            }
+        }
+        
+        Expr::BinOp(op, e1, e2) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            
+            instr_vec.extend(compile_to_instrs_opt(e1, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+            let off = -(stack_buff);
+            instr_vec.push(Instr::MovToMem(Reg::Rbp, off, Val::Reg(Reg::Rax)));
+            instr_vec.extend(compile_to_instrs_opt(e2, stack_buff + 8, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+            instr_vec.push(Instr::IMov(Val::Reg(Reg::Rcx), Val::Reg(Reg::Rax)));
+            instr_vec.push(Instr::MovFromMem(Val::Reg(Reg::Rax), Reg::Rbp, off));
+
+            match op {
+                Op2::Plus | Op2::Minus | Op2::Times => {
+                    // OPTIMIZATION 1: Skip tag checks if both operands are known to be Num
+                    let (e1_type, _) = tc(e1, tenv);
+                    let (e2_type, _) = tc(e2, tenv);
+                    
+                    if !matches!(e1_type, Type::Num) || !matches!(e2_type, Type::Num) {
+                        // Emit tag checks only if types are not definitively Num
+                        let err_l = format!("err_binop_{}", *lbl);
+                        let ok_l = format!("ok_binop_{}", *lbl); *lbl += 1;
+                        
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_TRUE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_FALSE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::Jmp(ok_l.clone()));
+                        instr_vec.push(Instr::Label(err_l));
+                        instr_vec.push(Instr::CallError(ERROR_ARITH_NOT_NUM));
+                        instr_vec.push(Instr::Label(ok_l));
+                    } else {
+                        instr_vec.push(Instr::Comment(format!("Optimized: skip tag checks for {:?} (both Num)", op)));
+                    }
+
+                    match op {
+                        Op2::Plus => {
+                            let of_l = format!("of_ar_{}", *lbl);
+                            let cont_l = format!("cont_ar_{}", *lbl); *lbl += 1;
+                            instr_vec.push(Instr::IAdd(Val::Reg(Reg::Rax), Val::Reg(Reg::Rcx)));
+                            instr_vec.push(Instr::JO(of_l.clone()));
+                            instr_vec.push(Instr::Jmp(cont_l.clone()));
+                            instr_vec.push(Instr::Label(of_l));
+                            instr_vec.push(Instr::CallError(ERROR_OVERFLOW));
+                            instr_vec.push(Instr::Label(cont_l));
+                        }
+                        Op2::Minus => {
+                            let of_l = format!("of_ar_{}", *lbl);
+                            let cont_l = format!("cont_ar_{}", *lbl); *lbl += 1;
+                            instr_vec.push(Instr::ISub(Val::Reg(Reg::Rax), Val::Reg(Reg::Rcx)));
+                            instr_vec.push(Instr::JO(of_l.clone()));
+                            instr_vec.push(Instr::Jmp(cont_l.clone()));
+                            instr_vec.push(Instr::Label(of_l));
+                            instr_vec.push(Instr::CallError(ERROR_OVERFLOW));
+                            instr_vec.push(Instr::Label(cont_l));
+                        }
+                        Op2::Times => {
+                            instr_vec.push(Instr::ISar(Val::Reg(Reg::Rax), Val::I32(1)));
+                            let of_l = format!("of_ar_{}", *lbl);
+                            let cont_l = format!("cont_ar_{}", *lbl); *lbl += 1;
+                            instr_vec.push(Instr::IMul(Val::Reg(Reg::Rax), Val::Reg(Reg::Rcx)));
+                            instr_vec.push(Instr::JO(of_l.clone()));
+                            instr_vec.push(Instr::Jmp(cont_l.clone()));
+                            instr_vec.push(Instr::Label(of_l));
+                            instr_vec.push(Instr::CallError(ERROR_OVERFLOW));
+                            instr_vec.push(Instr::Label(cont_l));
+                        }
+                        _ => unreachable!(),
+                    }
+                    instr_vec
+                }
+                Op2::Greater | Op2::GreaterEqual | Op2::Less | Op2::LessEqual => {
+                    // OPTIMIZATION 1: Skip tag checks if both operands are known to be Num
+                    let (e1_type, _) = tc(e1, tenv);
+                    let (e2_type, _) = tc(e2, tenv);
+                    
+                    if !matches!(e1_type, Type::Num) || !matches!(e2_type, Type::Num) {
+                        let err_l = format!("err_cmp_{}", *lbl);
+                        let ok_l = format!("ok_cmp_{}", *lbl); *lbl += 1;
+                        
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_TRUE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::I32(BOOL_FALSE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_TRUE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_FALSE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::Jmp(ok_l.clone()));
+                        instr_vec.push(Instr::Label(err_l));
+                        instr_vec.push(Instr::CallError(ERROR_COMP_NOT_NUM));
+                        instr_vec.push(Instr::Label(ok_l));
+                    } else {
+                        instr_vec.push(Instr::Comment(format!("Optimized: skip tag checks for {:?} (both Num)", op)));
+                    }
+
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::Reg(Reg::Rcx)));
+                    instr_vec.push(Instr::IMov(Val::Reg(Reg::Rax), Val::I32(0)));
+                    match op {
+                        Op2::Greater => instr_vec.push(Instr::ISetG),
+                        Op2::GreaterEqual => instr_vec.push(Instr::ISetGE),
+                        Op2::Less => instr_vec.push(Instr::ISetL),
+                        Op2::LessEqual => instr_vec.push(Instr::ISetLE),
+                        _ => unreachable!(),
+                    }
+                    instr_vec.push(Instr::IShl(Val::Reg(Reg::Rax), Val::I32(1)));
+                    instr_vec.push(Instr::IAdd(Val::Reg(Reg::Rax), Val::I32(1)));
+                    instr_vec
+                }
+                Op2::Equal => {
+                    instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rax), Val::Reg(Reg::Rcx)));
+                    instr_vec.push(Instr::IMov(Val::Reg(Reg::Rax), Val::I32(0)));
+                    instr_vec.push(Instr::ISetE);
+                    instr_vec.push(Instr::IShl(Val::Reg(Reg::Rax), Val::I32(1)));
+                    instr_vec.push(Instr::IAdd(Val::Reg(Reg::Rax), Val::I32(1)));
+                    instr_vec
+                }
+            }
+        }
+        
+        // OPTIMIZATION 4: Reduce (cast T e) to e if type of e is subtype of T
+        Expr::Cast(target_type, subexpr) => {
+            let (subexpr_type, _) = tc(subexpr, tenv);
+            
+            if subtype(subexpr_type.clone(), target_type.clone()) {
+                // Cast is unnecessary, just compile the subexpression
+                let mut instr_vec = vec![Instr::Comment(format!("Optimized: cast {:?} to {:?} eliminated (subtype)", subexpr_type, target_type))];
+                instr_vec.extend(compile_to_instrs_opt(subexpr, stack_buff, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                instr_vec
+            } else {
+                // Need runtime cast - same as original
+                let mut instr_vec: Vec<Instr> = compile_to_instrs_opt(subexpr, stack_buff, env, &define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv);
+                
+                match target_type {
+                    Type::Num => {
+                        let ok_l = format!("cast_num_ok_{}", *lbl);
+                        let err_l = format!("cast_num_err_{}", *lbl); *lbl += 1;
+                        
+                        instr_vec.push(Instr::IMov(Val::Reg(Reg::Rcx), Val::Reg(Reg::Rax)));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_TRUE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_FALSE as i32)));
+                        instr_vec.push(Instr::Jz(err_l.clone()));
+                        instr_vec.push(Instr::Jmp(ok_l.clone()));
+
+                        instr_vec.push(Instr::Label(err_l));
+                        instr_vec.push(Instr::CallError(ERROR_BAD_CAST));
+                        instr_vec.push(Instr::Label(ok_l));
+                    }
+                    Type::Bool => {
+                        let ok_l = format!("cast_bool_ok_{}", *lbl);
+                        let err_l = format!("cast_bool_err_{}", *lbl); *lbl += 1;
+                        
+                        instr_vec.push(Instr::IMov(Val::Reg(Reg::Rcx), Val::Reg(Reg::Rax)));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_TRUE as i32)));
+                        instr_vec.push(Instr::Jz(ok_l.clone()));
+                        instr_vec.push(Instr::ICmp(Val::Reg(Reg::Rcx), Val::I32(BOOL_FALSE as i32)));
+                        instr_vec.push(Instr::Jz(ok_l.clone()));
+
+                        instr_vec.push(Instr::Label(err_l));
+                        instr_vec.push(Instr::CallError(ERROR_BAD_CAST));
+                        instr_vec.push(Instr::Label(ok_l));
+                    }
+                    Type::Nothing => {
+                        instr_vec.push(Instr::CallError(ERROR_BAD_CAST));
+                    }
+                    Type::Any => {
+                        // Cast to Any always succeeds - value already in rax
+                    }
+                }
+                instr_vec
+            }
+        }
+        
+        Expr::Call(fname, args) => {
+            let mut instr_vec: Vec<Instr> = Vec::new();
+            // Push args right-to-left to match the parameter layout
+            for (i, arg) in args.iter().enumerate().rev() {
+                instr_vec.extend(compile_to_instrs_opt(arg, stack_buff + (i as i32) * 8, env, define_env, define_ptr_env, lbl, break_label, fun_labels, fun_ptrs, tenv));
+                instr_vec.push(Instr::SubRsp(8));
+                instr_vec.push(Instr::MovToMem(Reg::Rsp, 0, Val::Reg(Reg::Rax)));
+            }
+            if let Some((_, fun_label)) = fun_labels.get(fname) {
+                instr_vec.push(Instr::CallLabel(fun_label.clone()));
+            } else if let Some((_, fun_ptr)) = fun_ptrs.get(fname) {
+                instr_vec.push(Instr::IMov(Val::Reg(Reg::Rcx), Val::I64(*fun_ptr as i64)));
+                instr_vec.push(Instr::CallPtr(*fun_ptr as i64));
+            } else {
+                panic!("Undefined function {}", fname);
+            }
+            if args.len() > 0 { instr_vec.push(Instr::AddRsp((args.len() as i32)*8)); }
+            instr_vec
+        }
+    }
+}
+
 fn compile_program_to_string(p: &Program) -> String {
     let fun_sigs = build_fun_sigs(&p.defs);
     let mut all: Vec<Instr> = Vec::new();
     let mut lbl = 0;
     for d in &p.defs { all.extend(compile_function_instrs(d, &fun_sigs, &mut lbl, &HashMap::new(), &std::collections::HashMap::new())); }
     all.extend(compile_entry_instrs(&p.body, &fun_sigs, &mut lbl, &HashMap::new(), &std::collections::HashMap::new()));
+    let mut res = String::new();
+    for instr in all {
+        res.push_str(&instr_to_str(&instr));
+        res.push_str("\n");
+    }
+    res
+}
+
+// Optimized compilation with type information
+fn compile_program_to_string_opt(p: &Program, input_type: Option<Type>) -> String {
+    let tenv = build_tenv(&p.defs, input_type);
+    let mut all: Vec<Instr> = Vec::new();
+    let mut lbl = 0;
+    
+    // Build function labels map
+    let mut fun_labels: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
+    for def in &p.defs {
+        let label = format!("fun_{}", def.name);
+        fun_labels.insert(def.name.clone(), (def.params.len(), label));
+    }
+    
+    // Compile each function with type information
+    for def in &p.defs {
+        all.push(Instr::Label(format!("fun_{}", def.name)));
+        all.push(Instr::Push(Reg::Rbp));
+        all.push(Instr::IMov(Val::Reg(Reg::Rbp), Val::Reg(Reg::Rsp)));
+        
+        // Build local type environment and variable environment for function
+        let mut fun_tenv = TEnv {
+            vars: im::HashMap::new(),
+            funcs: tenv.funcs.clone(),
+            input_type: tenv.input_type.clone(),
+        };
+        
+        let mut fun_env: im::HashMap<String, i32> = im::HashMap::new();
+        let mut param_offset = 16;
+        for (param_name, param_type) in &def.params {
+            fun_tenv.vars.insert(param_name.clone(), param_type.clone());
+            fun_env.insert(param_name.clone(), param_offset);
+            param_offset += 8;
+        }
+        
+        let body_instrs = compile_to_instrs_opt(&def.body, 8, &fun_env, &HashMap::new(), &std::collections::HashMap::new(), &mut lbl, None, &fun_labels, &std::collections::HashMap::new(), &fun_tenv);
+        all.extend(body_instrs);
+        all.push(Instr::IMov(Val::Reg(Reg::Rsp), Val::Reg(Reg::Rbp)));
+        all.push(Instr::Pop(Reg::Rbp));
+        all.push(Instr::Ret());
+    }
+    
+    // Compile main entry point
+    all.push(Instr::Label(String::from("our_code_starts_here")));
+    all.push(Instr::Push(Reg::Rbp));
+    all.push(Instr::IMov(Val::Reg(Reg::Rbp), Val::Reg(Reg::Rsp)));
+    // Allocate stack frame
+    let frame_slots = max_stack_usage(&p.body);
+    let frame_size = if frame_slots > 0 { frame_slots * 8 } else { 0 };
+    if frame_size > 0 { all.push(Instr::SubRsp(frame_size)); }
+    
+    let body_instrs = compile_to_instrs_opt(&p.body, 8, &im::HashMap::new(), &HashMap::new(), &std::collections::HashMap::new(), &mut lbl, None, &fun_labels, &std::collections::HashMap::new(), &tenv);
+    all.extend(body_instrs);
+    
+    // Deallocate stack frame and return
+    if frame_size > 0 { all.push(Instr::AddRsp(frame_size)); }
+    all.push(Instr::Pop(Reg::Rbp));
+    all.push(Instr::Ret());
+    
     let mut res = String::new();
     for instr in all {
         res.push_str(&instr_to_str(&instr));
@@ -1843,13 +2403,73 @@ fn tc(expr: &Expr, tenv: &TEnv) -> (Type, Type) {
         }
         
         Expr::If(cond, thn, els) => {
+            // Check for optimization opportunities with isbool/isnum predicates
+            let optimization = match cond.as_ref() {
+                Expr::UnOp(Op1::IsBool, inner) => {
+                    // Check the type of the inner expression
+                    match inner.as_ref() {
+                        Expr::Id(name) => {
+                            // Get the type of the variable
+                            tenv.vars.get(name).cloned()
+                        }
+                        Expr::Num(_) => Some(Type::Num),
+                        Expr::Boolean(_) => Some(Type::Bool),
+                        _ => None,
+                    }
+                }
+                Expr::UnOp(Op1::IsNum, inner) => {
+                    // Check the type of the inner expression
+                    match inner.as_ref() {
+                        Expr::Id(name) => {
+                            // Get the type of the variable
+                            tenv.vars.get(name).cloned()
+                        }
+                        Expr::Num(_) => Some(Type::Num),
+                        Expr::Boolean(_) => Some(Type::Bool),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+
             let (cond_t, cond_b) = tc(cond, tenv);
             if !subtype(cond_t, Type::Bool) {
                 panic!("Type error: if condition must be Bool");
             }
             
-            let (thn_t, thn_b) = tc(thn, tenv);
-            let (els_t, els_b) = tc(els, tenv);
+            // Apply optimization rules based on known types
+            let (thn_t, thn_b, els_t, els_b) = match (cond.as_ref(), optimization) {
+                // Rule: Γ ⊢ (if (isbool v) e2 e3) : T when Γ ⊢ e2 : T and Γ ⊢ v : Bool
+                (Expr::UnOp(Op1::IsBool, _), Some(Type::Bool)) => {
+                    let (thn_t, thn_b) = tc(thn, tenv);
+                    // Only type-check the then branch; else branch is unreachable
+                    (thn_t.clone(), thn_b, thn_t, Type::Nothing)
+                }
+                // Rule: Γ ⊢ (if (isbool v) e2 e3) : T when Γ ⊢ e3 : T and Γ ⊢ v : Num
+                (Expr::UnOp(Op1::IsBool, _), Some(Type::Num)) => {
+                    let (els_t, els_b) = tc(els, tenv);
+                    // Only type-check the else branch; then branch is unreachable
+                    (els_t.clone(), Type::Nothing, els_t, els_b)
+                }
+                // Rule: Γ ⊢ (if (isnum v) e2 e3) : T when Γ ⊢ e3 : T and Γ ⊢ v : Bool
+                (Expr::UnOp(Op1::IsNum, _), Some(Type::Bool)) => {
+                    let (els_t, els_b) = tc(els, tenv);
+                    // Only type-check the else branch; then branch is unreachable
+                    (els_t.clone(), Type::Nothing, els_t, els_b)
+                }
+                // Rule: Γ ⊢ (if (isnum v) e2 e3) : T when Γ ⊢ e2 : T and Γ ⊢ v : Num
+                (Expr::UnOp(Op1::IsNum, _), Some(Type::Num)) => {
+                    let (thn_t, thn_b) = tc(thn, tenv);
+                    // Only type-check the then branch; else branch is unreachable
+                    (thn_t.clone(), thn_b, thn_t, Type::Nothing)
+                }
+                // Default case: type-check both branches normally
+                _ => {
+                    let (thn_t, thn_b) = tc(thn, tenv);
+                    let (els_t, els_b) = tc(els, tenv);
+                    (thn_t, thn_b, els_t, els_b)
+                }
+            };
             
             let result_type = union(thn_t, els_t);
             let break_type = union(union(cond_b, thn_b), els_b);
@@ -2362,7 +2982,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         "-tc" => {
-            // Typecheck and compile
+            // Typecheck and compile with optimizations
             if args.len() != 4 && args.len() != 5 {
                 panic!("Invalid arguments for \"-tc\" - Usage: program -tc <in.snek> <out.asm> [input]");
             }
@@ -2384,14 +3004,15 @@ fn main() -> std::io::Result<()> {
                 }
             }
             
-            // Then compile
+            // Then compile with optimizations
+            let opt_result = compile_program_to_string_opt(&program, None);
             let out_name = &args[3];
             let asm_program = if args.len() == 5 {
                 let tagged = parse_input_host(&args[4]) as i64;
-                let injected = result.replacen("our_code_starts_here:\n", &format!("our_code_starts_here:\n  mov rdi, {}\n", tagged), 1);
+                let injected = opt_result.replacen("our_code_starts_here:\n", &format!("our_code_starts_here:\n  mov rdi, {}\n", tagged), 1);
                 format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", injected)
             } else {
-                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", result)
+                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", opt_result)
             };
             let mut out_file = File::create(out_name)?;
             out_file.write_all(asm_program.as_bytes())?;
@@ -2399,7 +3020,7 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         }
         "-tg" => {
-            // Typecheck with input type, then generate and run
+            // Typecheck with input type, then generate and run with optimizations
             if args.len() != 4 && args.len() != 5 {
                 panic!("Invalid arguments for \"-tg\" - Usage: program -tg <in.snek> <out.asm> [input]");
             }
@@ -2412,7 +3033,7 @@ fn main() -> std::io::Result<()> {
             };
             
             // Typecheck with input type
-            match std::panic::catch_unwind(|| tc_program(&program, Some(input_type))) {
+            match std::panic::catch_unwind(|| tc_program(&program, Some(input_type.clone()))) {
                 Ok(_return_type) => {
                     println!("Type check passed!");
                 }
@@ -2428,14 +3049,15 @@ fn main() -> std::io::Result<()> {
                 }
             }
             
-            // Generate assembly
+            // Generate assembly with optimizations
+            let opt_result = compile_program_to_string_opt(&program, Some(input_type));
             let out_name = &args[3];
             let asm_program = if args.len() == 5 {
                 let tagged = parse_input_host(&args[4]) as i64;
-                let injected = result.replacen("our_code_starts_here:\n", &format!("our_code_starts_here:\n  mov rdi, {}\n", tagged), 1);
+                let injected = opt_result.replacen("our_code_starts_here:\n", &format!("our_code_starts_here:\n  mov rdi, {}\n", tagged), 1);
                 format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", injected)
             } else {
-                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", result)
+                format!("section .text\nextern snek_error, snek_print\nglobal our_code_starts_here\n{}", opt_result)
             };
             let mut out_file = File::create(out_name)?;
             out_file.write_all(asm_program.as_bytes())?;

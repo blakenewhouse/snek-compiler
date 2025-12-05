@@ -1,0 +1,5 @@
+(fun (test_isnum_with_bool (b : Bool)) -> Num
+  (if (isnum b) 
+    (+ b 10)
+    42))
+(test_isnum_with_bool true)
