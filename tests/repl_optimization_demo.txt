@@ -1,0 +1,4 @@
+(define x 42)
+(fun (add_x_typed (n : Num)) -> Num (+ x n))
+(fun (add_x_untyped n) (+ x n))
+exit

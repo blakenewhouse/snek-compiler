@@ -679,6 +679,7 @@ fn instr_to_asm(i: &Instr, ops: &mut dynasmrt::x64::Assembler) {
             (Val::Reg(Reg::Rcx), Val::Reg(Reg::Rax)) => dynasm!(ops ; .arch x64 ; mov rcx, rax),
             (Val::Reg(Reg::Rcx), Val::Reg(Reg::Rcx)) => dynasm!(ops ; .arch x64 ; mov rcx, rcx),
             (Val::Reg(Reg::Rcx), Val::Reg(Reg::Rdi)) => dynasm!(ops ; .arch x64 ; mov rcx, rdi),
+            (Val::Reg(Reg::Rsp), Val::Reg(Reg::Rbp)) => dynasm!(ops ; .arch x64 ; mov rsp, rbp),
             (Val::Reg(Reg::Rax), Val::I32(n)) => dynasm!(ops ; .arch x64 ; mov rax, *n),
             (Val::Reg(Reg::Rcx), Val::I32(n)) => dynasm!(ops ; .arch x64 ; mov rcx, *n),
             (Val::Reg(Reg::Rax), Val::I64(n)) => dynasm!(ops ; .arch x64 ; mov rax, QWORD *n),
@@ -2255,6 +2256,150 @@ fn eval_jit_expr_with_env_and_ptrs(expr: &Expr, define_env: &HashMap<String, i64
     Ok(result)
 }
 
+// Optimized JIT compilation functions that use type information
+
+fn compile_entry_instrs_with_ptrs_opt(body: &Expr, lbl: &mut i32, define_env: &HashMap<String, i64>, define_ptr_env: &std::collections::HashMap<String, i64>, fun_ptrs: &std::collections::HashMap<String, (usize, i64)>, tenv: &TEnv) -> Vec<Instr> {
+    let mut instrs: Vec<Instr> = Vec::new();
+    instrs.push(Instr::Label("our_code_starts_here".to_string()));
+    instrs.push(Instr::Push(Reg::Rbp));
+    instrs.push(Instr::IMov(Val::Reg(Reg::Rbp), Val::Reg(Reg::Rsp)));
+    let frame_slots = max_stack_usage(body);
+    let frame_size = if frame_slots > 0 { frame_slots * 8 } else { 0 };
+    if frame_size > 0 { instrs.push(Instr::SubRsp(frame_size)); }
+
+    let env: im::HashMap<String, i32> = im::HashMap::new();
+    let empty_labels: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
+    let body_instrs = compile_to_instrs_opt(body, 8, &env, define_env, define_ptr_env, lbl, None, &empty_labels, fun_ptrs, tenv);
+    instrs.extend(body_instrs);
+
+    if frame_size > 0 { instrs.push(Instr::AddRsp(frame_size)); }
+    instrs.push(Instr::Pop(Reg::Rbp));
+    instrs.push(Instr::Ret());
+    instrs
+}
+
+fn compile_function_instrs_repl_opt(def: &FunDef, lbl: &mut i32, define_env: &HashMap<String, i64>, define_ptr_env: &std::collections::HashMap<String, i64>, fun_ptrs: &std::collections::HashMap<String, (usize, i64)>, tenv: &TEnv) -> Vec<Instr> {
+    let mut instrs: Vec<Instr> = Vec::new();
+    let label = format!("fun_{}_entry", def.name);
+    instrs.push(Instr::Label(label));
+    instrs.push(Instr::Push(Reg::Rbp));
+    instrs.push(Instr::IMov(Val::Reg(Reg::Rbp), Val::Reg(Reg::Rsp)));
+    let frame_slots = max_stack_usage(&def.body);
+    let frame_size = if frame_slots > 0 { frame_slots * 8 } else { 0 };
+    if frame_size > 0 { instrs.push(Instr::SubRsp(frame_size)); }
+    
+    // Build variable environment for stack offsets
+    let mut env: im::HashMap<String, i32> = im::HashMap::new();
+    for (i, (param_name, _param_type)) in def.params.iter().enumerate() { 
+        let off = 16 + (i as i32)*8; 
+        env.insert(param_name.clone(), off); 
+    }
+    
+    // Build type environment with function parameters
+    let mut fun_tenv = TEnv {
+        vars: tenv.vars.clone(),
+        funcs: tenv.funcs.clone(),
+        input_type: tenv.input_type.clone(),
+    };
+    for (param_name, param_type) in &def.params {
+        fun_tenv.vars.insert(param_name.clone(), param_type.clone());
+    }
+    
+    let empty_labels: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
+    let body_instrs = compile_to_instrs_opt(&def.body, 8, &env, define_env, define_ptr_env, lbl, None, &empty_labels, fun_ptrs, &fun_tenv);
+    instrs.extend(body_instrs);
+    
+    if frame_size > 0 { instrs.push(Instr::AddRsp(frame_size)); }
+    instrs.push(Instr::Pop(Reg::Rbp));
+    instrs.push(Instr::Ret());
+    instrs
+}
+
+fn eval_jit_expr_with_env_and_ptrs_opt(expr: &Expr, define_env: &HashMap<String, i64>, define_ptr_env: &std::collections::HashMap<String, i64>, fun_ptrs: &std::collections::HashMap<String, (usize, i64)>, tenv: &TEnv) -> Result<i64, String> {
+    let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+    let start = ops.offset();
+    let mut lbl = 0;
+    let entry = compile_entry_instrs_with_ptrs_opt(expr, &mut lbl, define_env, define_ptr_env, fun_ptrs, tenv);
+    // set input to false by default for REPL
+    let to_load: i64 = tag_boolean(false);
+    dynasm!(ops ; .arch x64 ; mov rdi, QWORD to_load);
+    lower_instrs_to_ops(entry, &mut ops);
+    let buf = ops.finalize().unwrap();
+    let jitted_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(buf.ptr(start)) };
+    let result = jitted_fn();
+    Ok(result)
+}
+
+fn eval_jit_program_opt(prog: &Program, input_value: Option<i64>, input_type: Type) -> Result<i64, String> {
+    let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+    let start = ops.offset();
+    
+    // Build type environment with input type
+    let tenv = build_tenv(&prog.defs, Some(input_type));
+    
+    // Build function labels map
+    let mut fun_labels: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
+    for def in &prog.defs {
+        let label = format!("fun_{}", def.name);
+        fun_labels.insert(def.name.clone(), (def.params.len(), label));
+    }
+    
+    // Compile each function with type information
+    let mut all_instrs: Vec<Instr> = Vec::new();
+    let mut lbl = 0;
+    
+    for def in &prog.defs {
+        all_instrs.push(Instr::Label(format!("fun_{}", def.name)));
+        all_instrs.push(Instr::Push(Reg::Rbp));
+        all_instrs.push(Instr::IMov(Val::Reg(Reg::Rbp), Val::Reg(Reg::Rsp)));
+        
+        let mut fun_tenv = TEnv {
+            vars: im::HashMap::new(),
+            funcs: tenv.funcs.clone(),
+            input_type: tenv.input_type.clone(),
+        };
+        
+        let mut fun_env: im::HashMap<String, i32> = im::HashMap::new();
+        let mut param_offset = 16;
+        for (param_name, param_type) in &def.params {
+            fun_tenv.vars.insert(param_name.clone(), param_type.clone());
+            fun_env.insert(param_name.clone(), param_offset);
+            param_offset += 8;
+        }
+        
+        let body_instrs = compile_to_instrs_opt(&def.body, 8, &fun_env, &HashMap::new(), &std::collections::HashMap::new(), &mut lbl, None, &fun_labels, &std::collections::HashMap::new(), &fun_tenv);
+        all_instrs.extend(body_instrs);
+        all_instrs.push(Instr::IMov(Val::Reg(Reg::Rsp), Val::Reg(Reg::Rbp)));
+        all_instrs.push(Instr::Pop(Reg::Rbp));
+        all_instrs.push(Instr::Ret());
+    }
+    
+    // Compile main entry point
+    all_instrs.push(Instr::Label(String::from("our_code_starts_here")));
+    all_instrs.push(Instr::Push(Reg::Rbp));
+    all_instrs.push(Instr::IMov(Val::Reg(Reg::Rbp), Val::Reg(Reg::Rsp)));
+    let frame_slots = max_stack_usage(&prog.body);
+    let frame_size = if frame_slots > 0 { frame_slots * 8 } else { 0 };
+    if frame_size > 0 { all_instrs.push(Instr::SubRsp(frame_size)); }
+    
+    let body_instrs = compile_to_instrs_opt(&prog.body, 8, &im::HashMap::new(), &HashMap::new(), &std::collections::HashMap::new(), &mut lbl, None, &fun_labels, &std::collections::HashMap::new(), &tenv);
+    all_instrs.extend(body_instrs);
+    
+    if frame_size > 0 { all_instrs.push(Instr::AddRsp(frame_size)); }
+    all_instrs.push(Instr::Pop(Reg::Rbp));
+    all_instrs.push(Instr::Ret());
+    
+    // Set input value in RDI
+    let to_load: i64 = input_value.unwrap_or_else(|| tag_boolean(false));
+    dynasm!(ops ; .arch x64 ; mov rdi, QWORD to_load);
+    
+    lower_instrs_to_ops(all_instrs, &mut ops);
+    let buf = ops.finalize().unwrap();
+    let jitted_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(buf.ptr(start)) };
+    let result = jitted_fn();
+    Ok(result)
+}
+
 // puts every set! variable into a HashSet
 fn collect_set_targets(e: &Expr, acc: &mut HashSet<String>) {
     match e {
@@ -2667,7 +2812,7 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                     
                                     match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
                                         Ok((expr_type, _)) => {
-                                            // Type check passed, proceed with evaluation
+                                            // Type check passed, proceed with optimized evaluation
                                             for (name, val) in define_env.iter() {
                                                 if !define_ptr_env.contains_key(name) {
                                                     let boxed = Box::new(*val as i64);
@@ -2675,7 +2820,7 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                                     define_ptr_env.insert(name.clone(), ptr);
                                                 }
                                             }
-                                            match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+                                            match eval_jit_expr_with_env_and_ptrs_opt(&expr, &define_env, &define_ptr_env, &fun_ptrs, &tenv) {
                                                 Ok(value) => {
                                                     if let Some(ptr) = define_ptr_env.get(&var) {
                                                         unsafe { *( *ptr as *mut i64) = value as i64; }
@@ -2738,7 +2883,7 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                     
                                     match std::panic::catch_unwind(|| tc_function(&fd, &tenv)) {
                                         Ok(_) => {
-                                            // Type check passed, compile and store
+                                            // Type check passed, compile with optimizations and store
                                             if fun_defs.iter().any(|f| f.name == fd.name) {
                                                 if let Some(pos) = fun_defs.iter().position(|f| f.name == fd.name) { 
                                                     fun_defs.remove(pos); 
@@ -2748,7 +2893,15 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                             let mut ops = dynasmrt::x64::Assembler::new().unwrap();
                                             let start = ops.offset();
                                             let mut lbl = 0;
-                                            let finstrs = compile_function_instrs_repl(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs);
+                                            let finstrs = compile_function_instrs_repl_opt(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs, &tenv);
+                                            
+                                            // Print generated assembly for the function
+                                            //println!("\n--- Generated assembly for function '{}' ---", fd.name);
+                                            //for instr in &finstrs {
+                                            //    println!("{}", instr_to_str(instr));
+                                            //}
+                                            //println!("--- End of assembly ---\n");
+                                            
                                             lower_instrs_to_ops(finstrs, &mut ops);
                                             let buf = ops.finalize().unwrap();
                                             let ptr = buf.ptr(start) as i64;
@@ -2778,6 +2931,14 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                     let start = ops.offset();
                                     let mut lbl = 0;
                                     let finstrs = compile_function_instrs_repl(&fd, &mut lbl, &define_env, &define_ptr_env, &fun_ptrs);
+                                    
+                                    // Print generated assembly for the function (unoptimized)
+                                    //println!("\n--- Generated assembly for function '{}' (no optimization) ---", fd.name);
+                                    //for instr in &finstrs {
+                                    //    println!("{}", instr_to_str(instr));
+                                    //}
+                                    //println!("--- End of assembly ---\n");
+                                    
                                     lower_instrs_to_ops(finstrs, &mut ops);
                                     let buf = ops.finalize().unwrap();
                                     let ptr = buf.ptr(start) as i64;
@@ -2804,7 +2965,7 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                     
                                     match std::panic::catch_unwind(|| tc(&expr, &tenv)) {
                                         Ok((_expr_type, _)) => {
-                                            // Type check passed, now evaluate
+                                            // Type check passed, now evaluate with optimizations
                                             for (name, val) in define_env.iter() {
                                                 if !define_ptr_env.contains_key(name) {
                                                     let boxed = Box::new(*val as i64);
@@ -2812,7 +2973,7 @@ fn interactive_env(type_check: bool) -> std::io::Result<()> {
                                                     define_ptr_env.insert(name.clone(), ptr);
                                                 }
                                             }
-                                            match eval_jit_expr_with_env_and_ptrs(&expr, &define_env, &define_ptr_env, &fun_ptrs) {
+                                            match eval_jit_expr_with_env_and_ptrs_opt(&expr, &define_env, &define_ptr_env, &fun_ptrs, &tenv) {
                                                 Ok(result) => println!("{}", format_value(result)),
                                                 Err(e) => println!("{}", e),
                                             }
@@ -3070,7 +3231,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         "-te" => {
-            // Typecheck with input type, then evaluate
+            // Typecheck with input type, then evaluate with optimizations
             if args.len() != 3 && args.len() != 4 {
                 panic!("Invalid arguments for \"-te\" - Usage: program -te <in.snek> [input]");
             }
@@ -3083,7 +3244,7 @@ fn main() -> std::io::Result<()> {
             };
             
             // Typecheck with input type
-            match std::panic::catch_unwind(|| tc_program(&program, Some(input_type))) {
+            match std::panic::catch_unwind(|| tc_program(&program, Some(input_type.clone()))) {
                 Ok(_return_type) => {
                     println!("Type check passed!");
                 }
@@ -3099,10 +3260,10 @@ fn main() -> std::io::Result<()> {
                 }
             }
             
-            // Evaluate
+            // Evaluate with optimizations using known input type
             let input_opt = if args.len() == 4 { Some(parse_input_host(&args[3])) } else { None };
-            match eval_program(&in_contents, input_opt) {
-                Ok(result) => println!("{}", result),
+            match eval_jit_program_opt(&program, input_opt, input_type) {
+                Ok(result) => println!("{}", format_value(result)),
                 Err(e) => eprintln!("Error: {}", e),
             }
         }

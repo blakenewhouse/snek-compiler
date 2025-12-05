@@ -1,0 +1,4 @@
+(define x 42)
+(fun (add_x (n : Num)) -> Num (+ x n))
+(add_x 5)
+exit

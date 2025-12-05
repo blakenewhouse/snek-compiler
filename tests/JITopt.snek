@@ -1,0 +1,8 @@
+(fun (abs x) 
+    (if (< (cast Num x) 0) (- 0 (cast Num x)) x)
+)
+
+(block
+    (print (+ 5 input))
+    (abs input)
+)
